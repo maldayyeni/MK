@@ -462,13 +462,18 @@ function registerStrike(hit, x, y, word) {
    beat sections advance at an energy-scaled FPS and snap to the next frame on each detected bass beat. */
 const SONG_MAP = [ // [start, end) in seconds; the last section runs to the end of the track
   { t0: 0,  t1: 4,        sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Intro' },
-  { t0: 4,  t1: 14,       sheet: 'cross', mode: 'beat',  label: 'Victory 1 Crossover', part: 'Main beat' },
+  { t0: 4,  t1: 8,        sheet: 'cross', mode: 'script', label: 'Victory 1 Crossover (R/L)', part: 'Main beat · R/L',
+    moves: ['right', 'left', 'right', 'left', 'right', 'left'], gather: .3 },  // exactly 6 moves, strictly alternating
+  { t0: 8,  t1: 14,       sheet: 'cross', mode: 'beat',  label: 'Victory 1 Crossover', part: 'Main beat' },
   { t0: 14, t1: 24,       sheet: 'waist', mode: 'beat',  label: 'Victory 1 Hands on Waist', part: 'Bridge' },
   { t0: 24, t1: SONG_LOOP_S, sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Finale' }
 ];
 // share of a sweep section each frame takes: chest gather, arms start (held), opening, opening, full 180°.
 // The full extension arrives in the last ~12% of the section, so it peaks right at 4.0s / at the 27.0s loop point.
 const SWEEP_WEIGHTS = [1, 1.2, .8, .8, .5];
+// move1_crossover.png poses by the arm Rokaia extends (her own right = the arm reaching to screen-left, as she
+// faces us). Each scripted move gathers through a crossed-arms frame, then lands on the extended pose.
+const CROSS_RL = { right: [0, 6], left: [2, 4], cross: [7, 1, 3, 5, 7, 1] };
 // beat sections: frames per beat, top speed, and how early (share of the step) a detected hit may trigger the step
 const SONG_BPM = 100;        // felt tempo of the song stretched to 27.0s (~107 BPM original); used until the analyser has its own reading
 const BEAT_FEEL = {
@@ -629,6 +634,14 @@ function musicUpdate(dt) {
     let u = clamp((t - S.t0) / (S.t1 - S.t0), 0, .9999) * tot, f = 0;
     while (f < n - 1 && u >= w[f]) u -= w[f++];
     MUS.frame = f; MUS.fpsNow = n / (S.t1 - S.t0);
+  } else if (S.mode === 'script') {
+    // fixed choreography: the section is split evenly into its moves (4s / 6 = 0.67s each); every move spends its
+    // first `gather` share in a crossed-arms frame, then lands on and holds that side's extended pose
+    const D = (S.t1 - S.t0) / S.moves.length, u = (t - S.t0) / D;
+    const m = clamp(Math.floor(u), 0, S.moves.length - 1), side = S.moves[m];
+    const pose = CROSS_RL[side][Math.floor(m / 2) % 2], f = u - m < S.gather ? CROSS_RL.cross[m] : pose;
+    if (f === pose && MUS.frame !== pose) { MUS.bounce = 1; pulseBeat(); }  // a soft settle as the pose lands
+    MUS.frame = f; MUS.move = { i: m, n: S.moves.length, side }; MUS.fpsNow = 2 / D;
   } else if (MUS.playing) {
     // tempo-locked: the pace comes from the song's tempo (BEAT_FEEL frames per beat), energy only nudges it ±12%
     // and the section's FPS cap keeps it steady. A frame change waits for a detected hit once it is due, so the
@@ -642,7 +655,7 @@ function musicUpdate(dt) {
     MUS.fpsNow = 1 / iv;
   }
   MUS.bounce = Math.max(0, MUS.bounce - dt / 260);
-  const amp = S.sheet === 'cross' ? 12 : S.sheet === 'waist' ? 6 : 0;         // toe-bounce on the beat
+  const amp = S.mode === 'script' ? 6 : S.sheet === 'cross' ? 12 : S.sheet === 'waist' ? 6 : 0; // toe-bounce on the beat
   MUS.step = { sheet: S.sheet, f: MUS.frame, lift: Math.sin(MUS.bounce * Math.PI) * amp * (.5 + MUS.energy), section: S, n };
   syncMusicMeter();
 }
@@ -849,7 +862,8 @@ function drawHud(s, A, dur) {
   ctx.fillStyle = '#ffc85a'; ctx.font = '900 24px Impact, "Arial Black", sans-serif'; ctx.textAlign = 'left';
   ctx.fillText(A.music ? `${MUS.fpsNow.toFixed(1)} FPS` : `${P.fps} FPS`, W - 214, 28);
   ctx.fillStyle = '#9a90ad'; ctx.font = '12px "Segoe UI", sans-serif';
-  ctx.fillText(A.music ? (MUS.playing ? (s.section.mode === 'beat' ? `beat-synced${MUS.bpm ? ' · ' + MUS.bpm + ' BPM' : ''}` : 'song-timed sweep') : 'music paused')
+  ctx.fillText(A.music ? (MUS.playing ? (s.section.mode === 'beat' ? `beat-synced${MUS.bpm ? ' · ' + MUS.bpm + ' BPM' : ''}`
+      : s.section.mode === 'script' && MUS.move ? `move ${MUS.move.i + 1}/${MUS.move.n} · ${MUS.move.side} hand` : 'song-timed sweep') : 'music paused')
     : P.playing ? (P.loop ? 'playing · loop' : 'playing') : 'paused', W - 214, 56);
   if (A.music) { drawMusicBar(s); ctx.restore(); return; }
   if (s.tag) {
