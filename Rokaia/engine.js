@@ -677,6 +677,7 @@ function joeFrame(st, f) {
     case 'airPunch': case 'special': return ['punch', 0];                   // fireball thrown from the punch pose
     case 'airKick': case 'overhead': case 'slam': return ['kick', 0];
     case 'jumpRise': case 'jumpApex': case 'jumpFall': return ['jump', 0];
+    case 'defeat': return ['crouch', 0];                                      // beaten: down on one knee beside the winner
     default: return ['idle', 0];
   }
 }
@@ -736,8 +737,9 @@ const ROKAIA_ANIM = {
   walk:    { file: [RK_DIR + 'rokaia_walk.png'],   frames: 5, h: STAND_H },
   jump:    { file: [RK_DIR + 'rokaia_jump.png'],   frames: 4, h: STAND_H * 1.06 },
   crouch:  { file: [RK_DIR + 'rokaia_crouch.png'], frames: 3, use: [2], h: CROUCH_H },          // low kneeling guard = duck
-  punch:   { file: [RK_DIR + 'rokaia_punch.png'],  frames: 4, h: STAND_H },
-  kick:    { file: [RK_DIR + 'whip_batch1.png'],   frames: 4, use: [0, 1, 2, 1], fit: 0, h: STAND_H * .8 }, // ponytail snap
+  // J = punch is her ponytail hair whip (snap up, lash forward, recoil); K = kick is her own 6-frame high kick
+  punch:   { file: [RK_DIR + 'whip_batch1.png'],   frames: 4, use: [0, 1, 2, 1], fit: 0, h: STAND_H * .8 },
+  kick:    { file: [RK_DIR + 'rokaia_kick.png'],   frames: 6, fit: 0, h: STAND_H },   // guard, chamber, extension, re-chamber, set down, guard
   launch:  { file: [RK_DIR + 'whip_batch1.png'],   frames: 4, fit: 0, h: STAND_H * .8 },        // ponytail whip special
   block:   { file: [RK_DIR + 'rokaia_block.png'],  frames: 3, fit: 0, h: STAND_H },
   hit:     { file: [RK_DIR + 'rokaia_hit.png'],    frames: 3, h: STAND_H },
@@ -752,7 +754,8 @@ function rokaiaFrame(st, f) {
     case 'walk': return ['walk', ((Math.floor(f.walkPh * .5) % 5) + 5) % 5];
     case 'crouch': return ['crouch', 0];
     case 'block': return ['block', f.flash > 0 ? 1 : 0];
-    case 'punch': case 'kick': return [st.s, st.ph === 'wind' ? (st.k < .5 ? 0 : 1) : st.ph === 'strike' ? 2 : 3];
+    case 'punch': return ['punch', st.ph === 'wind' ? (st.k < .5 ? 0 : 1) : st.ph === 'strike' ? 2 : 3]; // hair whip
+    case 'kick': return ['kick', st.ph === 'wind' ? (st.k < .5 ? 0 : 1) : st.ph === 'strike' ? 2 : st.k < .34 ? 3 : st.k < .67 ? 4 : 5];
     case 'airPunch': return ['punch', 2];
     case 'airKick': return ['kick', 2];
     case 'overhead': return f.vy < 0 ? ['jump', 1] : ['kick', 2];
@@ -1684,7 +1687,9 @@ function gameOver() {
              | 9.0 game-over screen (long enough for the held frames of the victory animation, see VICTORY_HOLD) */
 const VICTORY_LEN = 9.0, SPECIAL_T = .9, CROUCH_T = 2.0, LEAP_T = 2.3, APEX_T = 2.75, SLAM_T = 2.95, LEAP_H = 240;
 function startVictory() {
-  Object.assign(G, { phase: 'victory', timer: 0, vt: 0, vClock: null, vStart: 0, vSlam: false, vSpecial: false });
+  const w0 = fighters[G.winnerIdx], l0 = fighters[1 - G.winnerIdx];
+  Object.assign(G, { phase: 'victory', timer: 0, vt: 0, vClock: null, vStart: 0, vSlam: false, vSpecial: false,
+    vSide: Math.sign(l0.x - w0.x) || (w0.x < cam.x + W / 2 ? 1 : -1) }); // the loser stays on this side of the winner
   projectiles = [];
   releaseAllLocal(); clearBuffers(); held[1] = {};   // freeze both players' input — the loser can't move anymore
   playVictoryMusic();                                // stops any match music, starts victory.mp3
@@ -1710,7 +1715,7 @@ function updateVictory() {
     if (l.knock === 'air') { l.airT++; l.vy += GRAV; l.y += l.vy; l.x += l.vx; if (l.y >= GROUND) { l.y = GROUND; l.vy = 0; l.onGround = true; l.knock = 'down'; } }
     if (l.knock === 'down' && vt >= 1.6) { l.knock = 'none'; l.vpose = 'defeat'; l.stun = 0; l.y = GROUND; l.onGround = true; l.vx = 0; l.facing = w.x >= l.x ? 1 : -1; }
     for (const f of fighters) if (f.flash > 0) f.flash--;
-    pullLoserIn(w, l); animateFighter(w); animateFighter(l);
+    centreWinner(w); pullLoserIn(w, l); animateFighter(w); animateFighter(l);
     if (vt >= VICTORY_LEN) gameOver();
     return;
   }
@@ -1748,7 +1753,8 @@ function updateVictory() {
   if (l.knock === 'air') { l.airT++; l.vy += GRAV; l.y += l.vy; l.x += l.vx; if (l.y >= GROUND) { l.y = GROUND; l.vy = 0; l.onGround = true; l.knock = 'down'; } }
   if (l.knock === 'down' && vt >= 1.6) { l.knock = 'none'; l.vpose = 'defeat'; l.stun = 0; l.y = GROUND; l.onGround = true; l.vx = 0; l.facing = w.x >= l.x ? 1 : -1; }
   for (const f of fighters) if (f.flash > 0) f.flash--;
-  pullLoserIn(w, l);                               // keep the defeated opponent in the shot with the winner
+  centreWinner(w);                                 // the shot is centred on the winner...
+  pullLoserIn(w, l);                               // ...with the defeated opponent right beside them
   animateFighter(w); animateFighter(l);
   if (vt >= VICTORY_LEN) gameOver();
 }
@@ -2319,10 +2325,20 @@ function pairFrame() {
   const L = Math.min(a[0], b[0]) - 30, R = Math.max(a[1], b[1]) + 30;
   return { L, R, cx: (L + R) / 2, span: R - L };
 }
+// victory: the winner eases to the middle of the arena, so the camera can sit centred on them with the zoom
+// (the painted arena is exactly one screen wide: centring a winner who finished at a wall would show past its edge)
+function centreWinner(w) {
+  if (!w.onGround) return;
+  const mid = cam.x + W / 2;
+  if (Math.abs(mid - w.x) > 1) w.x += (mid - w.x) * .05;
+}
 function pullLoserIn(w, l) {
   if (!l.onGround || l.knock === 'air') return;           // let the knockback flight play out first
   const d = l.x - w.x, side = Math.sign(d) || 1, gap = G.phase === 'victory' ? VICTORY_CLOSE_GAP : FRAME_GAP;
-  if (Math.abs(d) > gap) { l.x += (w.x + side * gap - l.x) * .07; l.vx = 0; }
+  if (G.phase === 'victory') { // right beside the winner, on the side they were knocked to — never on top of them
+    const s = G.vSide || side, target = w.x + s * gap;
+    if (Math.abs(target - l.x) > 1) { l.x += (target - l.x) * .07; l.vx = 0; }
+  } else if (Math.abs(d) > gap) { l.x += (w.x + side * gap - l.x) * .07; l.vx = 0; }
   // a body lying at a stage edge would stick out of the frame: ease it in until it is fully on screen
   const [a, b] = fighterExtent(l), lo = cam.x + 24, hi = cam.x + W - 24;
   if (a < lo) l.x += (lo - a) * .12; else if (b > hi) l.x -= (b - hi) * .12;
@@ -2337,23 +2353,23 @@ function victoryZoom() {
   // (heads to knees) so the details — Moe's gun draw / spin / bowtie, Romana's kiss — read big and clear
   const cel = smooth(w.char.victoryFrom - .4, w.char.victoryFrom + .9, vt);
   const zWant = lerp(1 + (.22 * smooth(0, 1.1, vt) + .08 * punch) * (1 - .9 * air), VICTORY_CLOSE_Z, cel);
-  // ...but never so far that the pair (winner + loser) stops fitting side by side
-  const z = Math.max(1, Math.min(zWant, W / PF.span));
-  // horizontal: centre the winner, then slide just enough to keep the loser in view (a = left edge of the view)
-  const Ls = PF.L - cam.x, Rs = PF.R - cam.x, vw = W / z;
-  let a = (w.x - cam.x) - vw / 2;
-  if (Rs - Ls <= vw + 1) a = clamp(a, Rs - vw, Ls);  // (+1: at the fitting zoom the two widths match up to rounding)
-  else a = (Ls + Rs - vw) / 2;                        // can't fit (only if the pair is wider than the screen): centre it
-  a = clamp(a, 0, W - vw);
+  // the camera is CENTRED ON THE WINNER; it zooms in only as far as the loser, eased in right beside them, still
+  // fits fully on that side of the frame (half the view must reach from the winner past the loser's far edge)
+  const half = Math.max(w.x - PF.L, PF.R - w.x);
+  // ...and only as far as both stay fully visible top to bottom too: heads under the top letterbox AND the floor
+  // (where a knocked-out loser lies) above the bottom one
+  const top = Math.min(...fighters.map(f => f.y - (f.spr ? f.spr.standH : FH))) - 44, floor = GROUND + 40;
+  const z = Math.max(1, Math.min(zWant, W / (2 * half), (H - 170) / (floor - top)));
+  const vw = W / z;
+  const a = clamp((w.x - cam.x) - vw / 2, 0, W - vw);  // a = left edge of the view (kept inside the arena)
   // vertical: keep the winner's feet just above the bottom letterbox and follow the leap upward; in the close-up,
   // anchor the top of both heads (incl. dizzy stars / tiara) just under the top letterbox instead
   const tyFeet = 636 - z * w.y;
-  const top = Math.min(...fighters.map(f => f.y - (f.spr ? f.spr.standH : FH))) - 44;
-  const tyHeads = 84 - z * top;
+  const tyHeads = Math.min(84 - z * top, H - 86 - z * floor);   // heads in, floor never cut off
   return [-a * z, clamp(lerp(tyFeet, tyHeads, cel), H - z * H, 0), z];
 }
 const VICTORY_CLOSE_Z = 1.55;  // celebration zoom (both fighters still side by side, heads to about the knees)
-const VICTORY_CLOSE_GAP = 400; // ...for which the loser is eased in to this distance
+const VICTORY_CLOSE_GAP = 310; // ...for which the loser is eased in to this distance: right beside the winner
 // ground break: glowing cracks radiating from the slam point, staying until the game-over screen
 const CRACKS = (() => {
   const r = seeded(4242), out = [];
@@ -2394,7 +2410,11 @@ function render() {
   if (G.phase !== 'menu') {
     if (victory) { drawGroundBreak(); drawVictoryRays(); }
     fighters.forEach(renderFighter);
-    const order = [...fighters].sort((a, b) => (a.action || a.vpose ? 1 : 0) - (b.action || b.vpose ? 1 : 0));
+    // draw order: once a round is decided the WINNER is always in front (their victory move is never hidden behind
+    // the loser); during the fight, whoever is attacking or posing draws on top
+    const decided = G.winnerIdx >= 0 && (G.phase === 'roundEnd' || G.phase === 'victory' || G.phase === 'gameover');
+    const order = decided ? [fighters[1 - G.winnerIdx], fighters[G.winnerIdx]]
+      : [...fighters].sort((a, b) => (a.action || a.vpose ? 1 : 0) - (b.action || b.vpose ? 1 : 0));
     order.forEach(drawShadow);
     // sprites go on with smoothing OFF (crisp pixels, also under the victory zoom); the painted arena, perspective
     // floor and bloom keep smoothing ON, because those are stretched textures that would turn blocky
