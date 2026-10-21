@@ -464,16 +464,17 @@ const SONG_MAP = [ // [start, end) in seconds; the last section runs to the end 
   { t0: 0,  t1: 4,        sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Intro' },
   { t0: 4,  t1: 8,        sheet: 'cross', mode: 'script', label: 'Victory 1 Crossover (R/L)', part: 'Main beat · R/L',
     moves: ['right', 'left', 'right', 'left', 'right', 'left'], gather: .3 },  // exactly 6 moves, strictly alternating
-  { t0: 8,  t1: 14,       sheet: 'cross', mode: 'beat',  label: 'Victory 1 Crossover', part: 'Main beat' },
+  { t0: 8,  t1: 14,       sheet: 'cross', mode: 'beat',  label: 'Victory 1 Crossover', part: 'Main beat',
+    startFrame: 1 },  // after move 6 (left): crossed arms, then the right-reaching pose — the alternation carries on
   { t0: 14, t1: 24,       sheet: 'waist', mode: 'beat',  label: 'Victory 1 Hands on Waist', part: 'Bridge' },
   { t0: 24, t1: SONG_LOOP_S, sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Finale' }
 ];
 // share of a sweep section each frame takes: chest gather, arms start (held), opening, opening, full 180°.
 // The full extension arrives in the last ~12% of the section, so it peaks right at 4.0s / at the 27.0s loop point.
 const SWEEP_WEIGHTS = [1, 1.2, .8, .8, .5];
-// move1_crossover.png poses by the arm Rokaia extends (her own right = the arm reaching to screen-left, as she
-// faces us). Each scripted move gathers through a crossed-arms frame, then lands on the extended pose.
-const CROSS_RL = { right: [0, 6], left: [2, 4], cross: [7, 1, 3, 5, 7, 1] };
+// move1_crossover.png poses by the side of the screen the extended arm reaches to (right = screen-right).
+// Each scripted move gathers through a crossed-arms frame, then lands on the extended pose.
+const CROSS_RL = { right: [2, 4], left: [0, 6], cross: [7, 1, 3, 5, 7, 1] };
 // beat sections: frames per beat, top speed, and how early (share of the step) a detected hit may trigger the step
 const SONG_BPM = 100;        // felt tempo of the song stretched to 27.0s (~107 BPM original); used until the analyser has its own reading
 const BEAT_FEEL = {
@@ -627,7 +628,7 @@ function musicUpdate(dt) {
   const beat = analyse(t);
   let si = secs.findIndex(s => t >= s.t0 && t < s.t1); if (si < 0) si = secs.length - 1;
   const S = secs[si], A = SPR[S.sheet], n = A ? A.frames.length : 1;
-  if (si !== MUS.sec) { MUS.sec = si; MUS.frame = 0; MUS.lastStep = t; P.i = si; renderTimeline(); }
+  if (si !== MUS.sec) { MUS.sec = si; MUS.frame = S.startFrame || 0; MUS.lastStep = t; P.i = si; renderTimeline(); }
   if (S.mode === 'sweep') {
     // one full 0° -> 180° sweep stretched exactly over the section
     const w = SWEEP_WEIGHTS.slice(0, n), tot = w.reduce((a, b) => a + b, 0);
