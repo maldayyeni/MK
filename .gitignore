@@ -1,0 +1,20 @@
+# Web build only: the browser games (Rokaia engine, WebGame) and their assets.
+# The Unreal project itself stays local (Content alone is ~600 MB of binary assets).
+/Content/
+/Config/
+/Intermediate/
+/Saved/
+/DerivedDataCache/
+/Binaries/
+/Build/
+/Plugins/
+*.uproject
+*.sln
+.vs/
+
+# local tooling + duplicates
+/.claude/
+/WebGame.zip
+Thumbs.db
+desktop.ini
+.DS_Store
