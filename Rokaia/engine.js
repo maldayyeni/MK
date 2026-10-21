@@ -858,9 +858,10 @@ const RK_SONG = 'assets/Rokaia/victory rokaia.mp3', RK_LOOP = 27.0;
 const CROSS_RL = { right: [2, 4], left: [0, 6], cross: [7, 1, 3, 5, 7, 1] };
 const RK_MAP = [ // [start, end) in seconds
   { t0: 0,  t1: 4,  anim: 'victory', mode: 'sweep', label: 'Victory 3 Arms Sweep' },
-  // exactly 6 moves, strictly alternating by screen side, starting slow and speeding up with the building song
+  // exactly 6 moves, strictly alternating by screen side, unhurried: they build only gently (~0.75s down to ~0.6s a
+  // move, no rushed finish), and each pose is held a little longer after a short crossed-arms gather
   { t0: 4,  t1: 8,  anim: 'dCross', mode: 'script', label: 'Victory 1 Crossover (R/L, building)',
-    moves: ['right', 'left', 'right', 'left', 'right', 'left'], pace: [1.45, 1.25, 1.05, .9, .75, .6], gather: .3 },
+    moves: ['right', 'left', 'right', 'left', 'right', 'left'], pace: [1.12, 1.06, 1.0, .96, .94, .92], gather: .24, bounce: 4 },
   // tempo-locked: crossed, RIGHT, crossed, LEFT, … so every beat lands on the other side (opens crossed: move 6 was left)
   { t0: 8,  t1: 10, anim: 'dCross', mode: 'beat', label: 'Victory 1 Crossover (on the beat)',
     order: [1, CROSS_RL.right[0], 3, CROSS_RL.left[1], 5, CROSS_RL.right[1], 7, CROSS_RL.left[0]] },
@@ -1011,7 +1012,7 @@ function rkUpdate(dt) {
     }
   }
   RK.bounce = Math.max(0, RK.bounce - dt / 260);
-  const amp = S.mode === 'script' ? 6 : S.anim === 'dCross' ? 12 : S.anim === 'dWaist' ? 6 : 0; // toe-bounce
+  const amp = S.bounce != null ? S.bounce : S.anim === 'dCross' ? 12 : S.anim === 'dWaist' ? 6 : 0; // toe-bounce
   RK.step = { anim: S.anim, f: Math.min(RK.frame, n - 1), lift: Math.sin(RK.bounce * Math.PI) * amp * (.5 + RK.energy), section: S, t };
 }
 // ROKAIA's special: a ponytail lash that cracks forward along the special lane (same lane / hit radius as the others)
@@ -1432,10 +1433,18 @@ function pickState(f) {
   if (f.vpose) return { s: f.vpose === 'rise' ? 'jumpRise' : f.vpose === 'slam' ? 'slam' : 'crouch' };
   if (f.knock === 'air') return { s: 'hitAir' };
   if (f.knock !== 'none') return { s: 'down' };
-  if (f.stun > 0) { // hit reaction plays across the stun: punches -> body blow, kicks -> head recoil
+  if (f.stun > 0) { // hit reaction: punches -> body blow, kicks -> head recoil
+    // ONE reaction per strike: it is timed from the moment the strike landed (not re-derived from the stun counter
+    // every frame), so it plays impact -> stagger -> recover exactly once and holds the recover frame until the stun
+    // ends. A new strike restarts it only once the current one is past its peak (no flicker on quick follow-ups).
+    // The start is detected locally (stun rising), so an online guest plays the same single reaction.
     const t = f.hitType || 'punch', len = (ATK[t] && ATK[t].stun) || 14;
-    return { s: 'stun', hit: usesFist(t) ? 'body' : 'head', i: clamp(Math.floor((1 - f.stun / len) * 4), 0, 3) };
+    const rose = f.react && f.stun > f.react.last, past = f.react && G.frame - f.react.t0 >= f.react.len * .5;
+    if (!f.react || (rose && past)) f.react = { t0: G.frame, len: Math.max(len, f.stun) };
+    f.react.last = f.stun;
+    return { s: 'stun', hit: usesFist(t) ? 'body' : 'head', i: clamp(Math.floor((G.frame - f.react.t0) / f.react.len * 4), 0, 3) };
   }
+  f.react = null;
   if (a) {
     const d = ATK[a.type];
     if (a.type === 'punch' || a.type === 'kick') {
@@ -2515,9 +2524,10 @@ function render() {
   if (G.phase !== 'menu') {
     ctx.save(); ctx.translate(sx, sy);
     if (VZ) { ctx.translate(VZ[0], VZ[1]); ctx.scale(VZ[2], VZ[2]); }
-    if (!victory) fighters.forEach(drawOverhead);
+    const clean = victory || G.phase === 'gameover'; // victory + game over: no bars or HUD over the scene (it shows
+    if (!clean) fighters.forEach(drawOverhead);     // through the see-through game-over screen behind the dance)
     drawPopups(); ctx.restore();
-    if (!victory) drawHUD();
+    if (!clean) drawHUD();
     drawBanners();
     drawNetBanner();
   }
