@@ -1,77 +1,86 @@
 'use strict';
 /* =====================================================================
-   ROKAIA — 2D canvas sprite animation engine
-   Pipeline: load each PNG sheet -> key the white paper to transparency -> slice the frames (every pose is its own
-   connected shape; grid sheets are read row by row) -> resize each sheet ONCE with high-quality smoothing ->
-   draw 1:1 with imageSmoothingEnabled = false, so the art stays pixel-sharp on the stage.
-   Playback runs on a timeline of steps: one frame each, lasting 1 / FPS, plus any heartbeat holds (victory poses)
-   or extra time (hit-stop, recovery). The ponytail whip builds its timeline live from the opponent distance.
+   MK ARCADE — Rokaia vs Joe, a 2D canvas fighting game
+   Flow: main menu -> character select (Rokaia / Joe) -> arena (best of 3 rounds vs the CPU) -> victory.
+   Rokaia's victory is her 27.0s routine, choreographed to "victory rokaia.mp3" and looping with it.
+
+   Sprite pipeline: load each PNG sheet -> key the white paper to transparency -> slice the frames (every pose is
+   its own connected shape; grid sheets are read row by row) -> resize each sheet ONCE with high-quality
+   smoothing -> draw 1:1 with imageSmoothingEnabled = false, so the art stays pixel-sharp.
    ===================================================================== */
 
 const W = 1280, H = 720;
 const GROUND = 618;          // feet line on the stage
 const STAND_H = 440;         // on-screen height of a standing pose
-const HERO_X = 330;          // Rokaia's feet
-const ASSET_DIRS = ['../assets/Rokaia/', './', 'assets/']; // first folder that has the file wins
+const TICK = 1000 / 60;      // fixed simulation step
+const ASSET_DIRS = ['assets/Rokaia/', '../assets/Rokaia/', './']; // first folder that has the file wins
+const JOE_DIRS = ['WebGame/', '../WebGame/'];
 const POCKET_MIN = 140;      // enclosed near-white areas at least this big are paper (between an arm and the waist)
 const WHIP_STRETCH = [0.6, 2.4]; // how far the ponytail may compress / stretch to meet the opponent
-const OPP_BODY = 62;         // opponent hurtbox half-width around their feet line
-const SONG_FILE = 'victory rokaia.mp3'; // victory song (same folders as the sprites)
-const SONG_LOOP_S = 27.0;    // the routine is one 27.0s loop: the song is time-stretched (pitch kept) to exactly this
+const BODY = 55;             // hurtbox half-width around a fighter's feet line
+const SONG_FILE = 'victory rokaia.mp3'; // Rokaia's victory song (same folders as her sprites)
+const SONG_LOOP_S = 27.0;    // her routine is one 27.0s loop: the song is time-stretched (pitch kept) to exactly this
+const JOE_SONG = 'victory.mp3';
+const ROUNDS_TO_WIN = 2, ROUND_TIME = 60;
 
-/* ---------- 1. asset manifest (14 files) ---------- */
+/* ---------- 1. asset manifest ---------- */
 const MANIFEST = [
-  { key: 'ref0',   file: 'rokaia_ref_0.png',    label: 'Full body reference' },
-  { key: 'ref1',   file: 'rokaia_ref_1.png',    label: 'Close-up portrait' },
-  { key: 'walk',   file: 'rokaia_walk.png',     label: 'Walk cycle' },
-  { key: 'jump',   file: 'rokaia_jump.png',     label: 'Jump sequence' },
-  { key: 'crouch', file: 'rokaia_crouch.png',   label: 'Crouch stance' },
-  { key: 'punch',  file: 'rokaia_punch.png',    label: 'Punch attack' },
-  { key: 'block',  file: 'rokaia_block.png',    label: 'Defensive guard' },
-  { key: 'hit',    file: 'rokaia_hit.png',      label: 'Hit reaction' },
-  { key: 'ko',     file: 'rokaia_ko.png',       label: 'Knockout' },
-  { key: 'cross',  file: 'move1_crossover.png', label: 'Victory 1 · crossover' },
-  { key: 'waist',  file: 'move1_batch2.png',    label: 'Victory 1 · hands on waist' },
-  { key: 'whip1',  file: 'whip_batch1.png',     label: 'Ponytail whip · extension' },
-  { key: 'whip2',  file: 'whip_batch2.png',     label: 'Ponytail whip · recoil' },
-  { key: 'sweep',  file: 'move3_batch.png',     label: 'Victory 3 · arms sweep' },
-  { key: 'joeSel', file: 'Joe selection.png',   label: 'Joe · character select', dirs: ['../WebGame/', './', 'WebGame/'] }
+  { key: 'ref1',    file: 'rokaia_ref_1.png' },
+  { key: 'walk',    file: 'rokaia_walk.png' },
+  { key: 'jump',    file: 'rokaia_jump.png' },
+  { key: 'crouch',  file: 'rokaia_crouch.png' },
+  { key: 'punch',   file: 'rokaia_punch.png' },
+  { key: 'block',   file: 'rokaia_block.png' },
+  { key: 'hit',     file: 'rokaia_hit.png' },
+  { key: 'ko',      file: 'rokaia_ko.png' },
+  { key: 'cross',   file: 'move1_crossover.png' },
+  { key: 'waist',   file: 'move1_batch2.png' },
+  { key: 'whip1',   file: 'whip_batch1.png' },
+  { key: 'whip2',   file: 'whip_batch2.png', optional: true },
+  { key: 'sweep',   file: 'move3_batch.png' },
+  { key: 'joeSel',  file: 'Joe selection.png', dirs: JOE_DIRS },
+  { key: 'jIdle',   file: 'joe_idle.png',      dirs: JOE_DIRS },
+  { key: 'jPunch',  file: 'joe_punch.png',     dirs: JOE_DIRS },
+  { key: 'jKick',   file: 'joe_kick.png',      dirs: JOE_DIRS },
+  { key: 'jCrouch', file: 'joe_crouch.png',    dirs: JOE_DIRS }
 ];
-
 // How each sheet is cut and scaled. frames: pose count ('auto' = count the big shapes); rows: grid rows.
 // Scale: h = on-screen height of the tallest frame (or of frame `fit`); scaleFrom = reuse another sheet's scale
-// (sheets drawn at the same size share it, so poses match). Processed in this order.
+// (sheets drawn at the same size share it, so poses match). key: false = already transparent. Processed in order.
 const SHEETS = {
-  walk:   { frames: 5, h: STAND_H },
-  punch:  { frames: 4, scaleFrom: 'walk' },
-  ko:     { frames: 3, scaleFrom: 'walk' },
-  block:  { frames: 3, fit: 0, h: STAND_H },
-  crouch: { frames: 3, scaleFrom: 'block' },
-  hit:    { frames: 3, scaleFrom: 'block' },
-  jump:   { frames: 4, scaleFrom: 'block' },
-  cross:  { frames: 8, rows: 2, fit: 0, h: STAND_H * 1.02 },
-  waist:  { frames: 8, rows: 2, fit: 0, h: STAND_H },
-  sweep:  { frames: 5, fit: 0, h: STAND_H },
-  whip1:  { frames: 4, scaleFrom: 'sweep' },
-  whip2:  { frames: 'auto', scaleFrom: 'sweep' },
-  ref0:   { frames: 1, h: STAND_H * 1.1 },
-  ref1:   { frames: 1, h: 560, pockets: false, portrait: true },
-  joeSel: { frames: 1, h: 540, key: false, portrait: true }   // photo card on a dark backdrop: shown as it is
+  walk:    { frames: 5, h: STAND_H },
+  punch:   { frames: 4, scaleFrom: 'walk' },
+  ko:      { frames: 3, scaleFrom: 'walk' },
+  block:   { frames: 3, fit: 0, h: STAND_H },
+  crouch:  { frames: 3, scaleFrom: 'block' },
+  hit:     { frames: 3, scaleFrom: 'block' },
+  jump:    { frames: 4, scaleFrom: 'block' },
+  cross:   { frames: 8, rows: 2, fit: 0, h: STAND_H * 1.02 },
+  waist:   { frames: 'auto', rows: 'auto', fit: 0, h: STAND_H, sameHeight: true }, // however many hands-on-waist poses the sheet has
+  sweep:   { frames: 5, fit: 0, h: STAND_H },
+  whip1:   { frames: 4, scaleFrom: 'sweep' },
+  whip2:   { frames: 'auto', scaleFrom: 'sweep' },
+  ref1:    { frames: 1, h: 470, pockets: false },
+  joeSel:  { frames: 1, h: 470, key: false },
+  jIdle:   { frames: 1, h: STAND_H * 1.04, key: false },
+  jPunch:  { frames: 1, scaleFrom: 'jIdle', key: false },
+  jKick:   { frames: 1, scaleFrom: 'jIdle', key: false },
+  jCrouch: { frames: 1, scaleFrom: 'jIdle', key: false }
 };
-// fighters on the select panel: portrait sheet + the stage view it opens
-const FIGHTERS = [
-  { id: 'rokaia', name: 'ROKAIA', sheet: 'ref1', anim: 'ref1', tag: 'Ponytail whip' },
-  { id: 'joe', name: 'JOE', sheet: 'joeSel', anim: 'refJoe', tag: 'Fire ninja' }
-];
 
 /* ---------- helpers ---------- */
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (a, b, t) => a + (b - a) * t;
-const ease = t => t * t * (3 - 2 * t);
 const rand = (a, b) => a + Math.random() * (b - a);
-function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h)); return c; }
-
+// work canvases are CPU-backed (willReadFrequently): their pixels are read back reliably and never dropped when
+// the GPU is short on memory; finished sprite strips are then frozen into ImageBitmaps (see loadAll)
+function mk(w, h) {
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h));
+  c.getContext('2d', { willReadFrequently: true });
+  return c;
+}
+const freeze = c => (window.createImageBitmap ? createImageBitmap(c).catch(() => c) : Promise.resolve(c));
 function loadImage(file, dirs = ASSET_DIRS) {
   return new Promise(resolve => {
     let i = 0;
@@ -163,14 +172,23 @@ function sliceSheet(K, spec) {
     comps.push({ L, x0, x1, y0, y1, n: qt });
   }
   comps.sort((a, b) => b.n - a.n);
-  const rows = spec.rows || 1;
-  let n = spec.frames === 'auto' ? Math.max(1, comps.filter(c => c.n >= comps[0].n * .2).length) : spec.frames;
+  const n = spec.frames === 'auto' ? Math.max(1, comps.filter(c => c.n >= comps[0].n * .2).length) : spec.frames;
   const big = comps.slice(0, n);
-  if (!comps.length || big.length < n || big.some(c => c.n < big[0].n * .1)) return gridSlice(K, typeof n === 'number' ? n : 1, rows);
-  // order: row by row (by vertical centre), then left to right
+  if (!comps.length || big.length < n || big.some(c => c.n < big[0].n * .1)) return gridSlice(K, n, spec.rows === 'auto' ? 1 : spec.rows || 1);
   big.sort((a, b) => (a.y0 + a.y1) - (b.y0 + b.y1));
-  const per = Math.ceil(n / rows), figs = [];
-  for (let r = 0; r < rows; r++) figs.push(...big.slice(r * per, (r + 1) * per).sort((a, b) => a.x0 - b.x0));
+  const figs = [];
+  if (spec.rows === 'auto') { // a new row starts wherever the vertical centres jump by more than half a figure
+    const tall = Math.max(...big.map(c => c.y1 - c.y0));
+    let row = [big[0]];
+    for (let i = 1; i <= big.length; i++) {
+      const c = big[i], prev = big[i - 1];
+      if (!c || (c.y0 + c.y1) / 2 - (prev.y0 + prev.y1) / 2 > tall * .5) { figs.push(...row.sort((a, b) => a.x0 - b.x0)); row = []; }
+      if (c) row.push(c);
+    }
+  } else {
+    const rows = spec.rows || 1, per = Math.ceil(n / rows);
+    for (let r = 0; r < rows; r++) figs.push(...big.slice(r * per, (r + 1) * per).sort((a, b) => a.x0 - b.x0));
+  }
   const own = figs.map(f => ({ set: new Set([f.L]), x0: f.x0, x1: f.x1, y0: f.y0, y1: f.y1 }));
   for (const c of comps) {
     if (figs.includes(c) || c.n < 15) continue;
@@ -195,16 +213,15 @@ function gridSlice(K, n, rows) {
   return out;
 }
 // copy one pose into its own canvas (trimmed to its pixels) and measure it:
-//   ax = feet centre (anchor), hand = frontmost fist (15-50% height),
+//   ax = feet centre (anchor), hand = frontmost fist (15-50% height), reach = frontmost pixel,
 //   zone = the ponytail whip area: rows above 45% height, columns in front of the body's lower half
 function cutFrame(K, x0, y0, x1, y1, mine, raw) {
   const { d, W: SW } = K;
   let w = x1 - x0 + 1, h = y1 - y0 + 1;
   if (raw || !d) { // unkeyed fallback (opened from file://): the cell as it is
     const c = mk(w, h); c.getContext('2d').drawImage(K.cv, x0, y0, w, h, 0, 0, w, h);
-    return { c, w, h, ax: w / 2, hand: [w * .8, h * .3], zone: null };
+    return { c, w, h, ax: w / 2, hand: [w * .8, h * .3], reach: w * .8, zone: null };
   }
-  // trim to the opaque pixels
   let tx0 = w, tx1 = -1, ty0 = h, ty1 = -1;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (!mine(x0 + x, y0 + y) || d[((y0 + y) * SW + x0 + x) * 4 + 3] <= 40) continue;
@@ -225,7 +242,7 @@ function cutFrame(K, x0, y0, x1, y1, mine, raw) {
   const front = (r0, r1) => { let best = -1, by = 0; for (let y = Math.floor(h * r0); y < h * r1; y++) for (let x = w - 1; x > best; x--) if (op[y * w + x]) { best = x; by = y; break; } return [best < 0 ? w : best, by]; };
   const band = Math.floor(h * .45), body = front(.45, 1)[0], tip = front(0, .45)[0];
   const zone = tip > body + 24 ? { split: body + 6, band, tip } : null;
-  return { c, w, h, ax: n ? sx / n : w / 2, hand: front(.15, .5), zone };
+  return { c, w, h, ax: n ? sx / n : w / 2, hand: front(.15, .5), reach: front(0, 1)[0], zone };
 }
 function resizeHQ(c, tw, th) {
   tw = Math.max(1, Math.round(tw)); th = Math.max(1, Math.round(th));
@@ -237,6 +254,13 @@ function resizeHQ(c, tw, th) {
   const n = mk(tw, th), g = n.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(cur, 0, 0, tw, th);
   return n;
 }
+// one cut frame scaled by s (canvas + every measurement)
+function sizeFrame(F, s) {
+  if (Math.abs(s - 1) < .005) return F;
+  const c = resizeHQ(F.c, F.w * s, F.h * s);
+  return { c, w: c.width, h: c.height, ax: F.ax * s, hand: [F.hand[0] * s, F.hand[1] * s], reach: F.reach * s,
+    zone: F.zone && { split: F.zone.split * s, band: F.zone.band * s, tip: F.zone.tip * s } };
+}
 // frames -> one strip, resized once to k (screen px per file px). Frame metrics are returned in screen px.
 function buildSheet(fr, k) {
   const pad = Math.ceil(4 / k) + 2, mh = Math.max(...fr.map(F => F.h));
@@ -246,256 +270,121 @@ function buildSheet(fr, k) {
   const strip = resizeHQ(src, src.width * k, src.height * k);
   const frames = fr.map((F, i) => ({
     sX: Math.round(pos[i] * k), sY: Math.round((mh - F.h) * k), w: Math.round(F.w * k), h: Math.round(F.h * k),
-    ax: F.ax * k, hand: [F.hand[0] * k, F.hand[1] * k],
+    ax: F.ax * k, hand: [F.hand[0] * k, F.hand[1] * k], reach: F.reach * k,
     zone: F.zone && { split: Math.round(F.zone.split * k), band: Math.round(F.zone.band * k), tip: F.zone.tip * k }
   }));
   return { strip, frames, k };
 }
 
 /* ---------- 4. load + process every sheet ---------- */
-const SPR = {};          // key -> { strip, frames, k, url }
-const ASSET_STATE = {};  // key -> 'ok' | 'missing'
+const SPR = {};          // key -> { strip, frames, k }
 let RAW_MODE = false;    // true when the page is opened from file:// (pixels can't be read: no keying)
-
 async function loadAll(onProgress) {
   const loaded = {};
   await Promise.all(MANIFEST.map(async a => { loaded[a.key] = await loadImage(a.file, a.dirs); }));
-  let done = 0;
-  for (const key of Object.keys(SHEETS)) {
-    const spec = SHEETS[key], L = loaded[key];
-    onProgress(`Processing ${MANIFEST.find(m => m.key === key).file}…`, ++done / Object.keys(SHEETS).length);
-    await new Promise(r => setTimeout(r, 0)); // let the loading text paint
-    if (!L) { ASSET_STATE[key] = 'missing'; continue; }
+  const keys = Object.keys(SHEETS);
+  for (let n = 0; n < keys.length; n++) {
+    const key = keys[n], spec = SHEETS[key], L = loaded[key];
+    onProgress(n / keys.length);
+    await new Promise(r => setTimeout(r, 0)); // let the loading bar paint
+    if (!L) continue;
     const img = L.img, cv = mk(img.naturalWidth, img.naturalHeight), g = cv.getContext('2d');
     g.drawImage(img, 0, 0);
-    let K = { cv, W: cv.width, H: cv.height, d: null };
+    const K = { cv, W: cv.width, H: cv.height, d: null };
     if (!RAW_MODE) {
       try {
         const id = g.getImageData(0, 0, cv.width, cv.height);
         if (spec.key !== false) { keyWhite(id.data, cv.width, cv.height, spec.pockets !== false); g.putImageData(id, 0, 0); }
         K.d = id.data;
-      }
-      catch (e) { RAW_MODE = true; }
+      } catch (e) { RAW_MODE = true; }
     }
-    const fr = K.d ? sliceSheet(K, spec) : gridSlice(K, typeof spec.frames === 'number' ? spec.frames : 4, spec.rows || 1);
+    let fr = K.d ? sliceSheet(K, spec) : gridSlice(K, typeof spec.frames === 'number' ? spec.frames : 4, spec.rows === 'auto' ? 1 : spec.rows || 1);
+    if (spec.sameHeight) fr = fr.map(F => sizeFrame(F, fr[0].h / F.h)); // poses drawn at different sizes: match frame 1
     const ref = spec.scaleFrom && SPR[spec.scaleFrom];
     const k = ref ? ref.k : spec.h / (spec.fit != null ? fr[Math.min(spec.fit, fr.length - 1)].h : Math.max(...fr.map(F => F.h)));
-    SPR[key] = Object.assign(buildSheet(fr, k), { url: L.url });
-    ASSET_STATE[key] = 'ok';
+    const sheet = buildSheet(fr, k);
+    sheet.strip = await freeze(sheet.strip);
+    SPR[key] = sheet;
   }
+  onProgress(1);
+  return MANIFEST.filter(m => !m.optional && !SPR[m.key]).map(m => m.file); // missing required files
 }
 
-/* ---------- 5. animations: timelines of steps ---------- */
-// step: { sheet, f, beats (heartbeat holds, victory only), extra (ms), tag, bounce (toe-bounce px), dy (jump lift),
-//         strike ('whip' | 'punch': hit check on entering), stretch (share of the whip stretch applied) }
-const seq = (sheet, list, extra = {}) => list.map(f => Object.assign({ sheet, f }, typeof extra === 'function' ? extra(f) : extra));
-const ANIMS = [
-  { id: 'idle', label: 'Idle · fighting stance', group: 'Movement', fps: 8, loop: true, needs: ['crouch'],
-    hint: 'Her guard stance (crouch frame 1) with a slow breathing bob.', build: () => [{ sheet: 'crouch', f: 0, breathe: true, extra: 1400 }] },
-  { id: 'walk', label: 'Walk cycle', group: 'Movement', fps: 9, loop: true, needs: ['walk'], scroll: true,
-    hint: '5-frame stride; the floor scrolls so the walk reads as travel.', build: () => seq('walk', [0, 1, 2, 3, 4]) },
-  { id: 'jump', label: 'Jump', group: 'Movement', fps: 7, loop: true, needs: ['jump'],
-    hint: 'Take-off squat, rise, tuck at the apex, landing reach. Height is eased between frames.',
-    build: () => [{ sheet: 'jump', f: 0, dy: 0, extra: 120 }, { sheet: 'jump', f: 1, dy: -150 }, { sheet: 'jump', f: 2, dy: -215 }, { sheet: 'jump', f: 3, dy: -70 }, { sheet: 'crouch', f: 1, dy: 0, extra: 140, tag: 'land' }] },
-  { id: 'crouch', label: 'Crouch', group: 'Movement', fps: 8, loop: true, needs: ['crouch'],
-    hint: 'Stance → squat → low kneeling guard, then back up.',
-    build: () => [{ sheet: 'crouch', f: 0, extra: 300 }, { sheet: 'crouch', f: 1 }, { sheet: 'crouch', f: 2, extra: 700, tag: 'low' }, { sheet: 'crouch', f: 1 }] },
-  { id: 'punch', label: 'Punch', group: 'Combat', fps: 12, loop: true, needs: ['punch'], opp: true,
-    hint: 'Strike registers on frame 3 (full extension) if her fist reaches the training partner.',
-    build: () => [{ sheet: 'punch', f: 0 }, { sheet: 'punch', f: 1 }, { sheet: 'punch', f: 2, strike: 'punch', extra: 90, tag: 'hit' }, { sheet: 'punch', f: 3, extra: 260 }] },
-  { id: 'block', label: 'Block · defensive guard', group: 'Combat', fps: 8, loop: true, needs: ['block'],
-    hint: 'Guard up, brace (crossed forearms), recover.', build: () => [{ sheet: 'block', f: 0, extra: 250 }, { sheet: 'block', f: 1, extra: 450, tag: 'brace' }, { sheet: 'block', f: 2, extra: 250 }] },
-  { id: 'hit', label: 'Hit reaction', group: 'Combat', fps: 9, loop: true, needs: ['hit'],
-    hint: 'Impact, head snap, recovery to guard.', build: () => [{ sheet: 'hit', f: 0 }, { sheet: 'hit', f: 1, extra: 120 }, { sheet: 'hit', f: 2, extra: 500 }] },
-  { id: 'ko', label: 'Knockout', group: 'Combat', fps: 5, loop: true, needs: ['ko'],
-    hint: 'Falling back, down on one knee, collapsed.', build: () => [{ sheet: 'ko', f: 0 }, { sheet: 'ko', f: 1, extra: 250 }, { sheet: 'ko', f: 2, extra: 1500, tag: 'down' }] },
-  { id: 'whip', label: 'Special · Ponytail Whip', group: 'Special', fps: 14, loop: true, needs: ['whip1'], opp: true, whip: true,
-    hint: 'whip_batch1 extends (stretched to the opponent distance); on the peak hit it switches to whip_batch2 played N → 0 and settles back into her stance.',
-    build: buildWhip },
-  { id: 'v1cross', label: 'Victory 1 · Crossover', group: 'Victory', fps: 5, loop: true, victory: true, needs: ['cross'],
-    hint: 'Hand-to-head crossover. Every arm extension holds 1 heartbeat; every side switch breathes 1 heartbeat, with a toe-bounce.',
-    build: () => crossSteps() },
-  { id: 'v1waist', label: 'Victory 1 · Hands on Waist', group: 'Victory', fps: 5, loop: true, victory: true, needs: ['waist'],
-    hint: 'Hands on hips, swaying back and forth; the lean extremes hold, each pass ends with a breath.',
-    build: () => waistSteps() },
-  { id: 'v1full', label: 'Victory 1 · Full Routine', group: 'Victory', fps: 5, loop: true, victory: true, needs: ['cross', 'waist'],
-    hint: 'Crossover, a breath, then the hands-on-waist sway.', build: () => [...crossSteps(), ...waistSteps()] },
-  { id: 'v3sweep', label: 'Victory 3 · Arms Sweep', group: 'Victory', fps: 5, loop: true, victory: true, needs: ['sweep'],
-    hint: 'Arms open from the chest in a 0° → 180° sweep: hold as they start, hold at full extension, breathe before the next sweep.',
-    build: () => [
-      { sheet: 'sweep', f: 0, beats: 1, tag: 'breath' },
-      { sheet: 'sweep', f: 1, beats: 1, tag: 'start' },
-      { sheet: 'sweep', f: 2 },
-      { sheet: 'sweep', f: 3 },
-      { sheet: 'sweep', f: 4, beats: 2, tag: 'peak + breath' }] },
-  { id: 'music', label: 'Victory Music · Synced Routine', group: 'Victory', fps: 5, loop: true, victory: true, music: true, needs: ['sweep', 'cross', 'waist'],
-    hint: `Driven by "${SONG_FILE}": intro sweep (0–4s), crossover (4–14s, 2 frames per beat, max 4.5 FPS) and hands-on-waist (14–24s, 1 sway per drum hit, max 2.2 FPS) locked to the song's tempo, then a 3-second finale sweep peaking at 27.0s. ←/→ seek 1s.`,
-    build: () => musicSections().map((s, i) => ({ sheet: s.sheet, f: 0, tag: s.part, t0: s.t0, t1: s.t1, sec: i })) },
-  { id: 'ref0', label: 'Reference · full body', group: 'Reference', fps: 1, loop: true, needs: ['ref0'], ref: true,
-    hint: 'rokaia_ref_0.png', build: () => [{ sheet: 'ref0', f: 0, extra: 1000 }] },
-  { id: 'ref1', label: 'Character select · Rokaia', group: 'Reference', fps: 1, loop: true, needs: ['ref1'], ref: true, portrait: true, fighter: 'rokaia',
-    hint: 'rokaia_ref_1.png — close-up portrait', build: () => [{ sheet: 'ref1', f: 0, extra: 1000 }] },
-  { id: 'refJoe', label: 'Character select · Joe', group: 'Reference', fps: 1, loop: true, needs: ['joeSel'], ref: true, portrait: true, fighter: 'joe',
-    hint: 'WebGame/Joe selection.png — his character-select portrait', build: () => [{ sheet: 'joeSel', f: 0, extra: 1000 }] }
-];
-// crossover: frames alternate arm-out (peak) / crossed gather (side switch)
-function crossSteps() {
-  return seq('cross', [0, 1, 2, 3, 4, 5, 6, 7], f => f % 2 === 0 ? { beats: 1, tag: 'peak', bounce: 5 } : { beats: 1, tag: 'breath', bounce: 11 });
+/* ---------- 5. sound effects (tiny synth) ---------- */
+const SFX = { ctx: null, on: true };
+function sfxCtx() {
+  if (!SFX.ctx) { try { SFX.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } }
+  if (SFX.ctx.state === 'suspended') SFX.ctx.resume();
+  return SFX.ctx;
 }
-// hands on waist: neutral, lean, turn, settle — the two extremes of each pass hold, the pass ends with a breath
-function waistSteps() {
-  const tags = ['', 'peak', 'peak', 'breath', '', 'peak', 'peak', 'breath'];
-  return seq('waist', [0, 1, 2, 3, 4, 5, 6, 7], f => tags[f] ? { beats: 1, tag: tags[f], sway: true } : { sway: true });
+function tone(f0, f1, dur, type = 'square', vol = .12) {
+  const c = SFX.on && sfxCtx(); if (!c) return;
+  const o = c.createOscillator(), g = c.createGain(), t = c.currentTime;
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + dur);
+  o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + dur);
 }
-// ponytail whip: extend (batch 1) -> peak hit -> recoil (batch 2, played N -> 0) -> back into her stance
-function buildWhip() {
-  const w1 = SPR.whip1.frames.length, steps = [];
-  for (let i = 0; i < w1; i++) {
-    const last = i === w1 - 1;
-    steps.push({ sheet: 'whip1', f: i, stretch: last ? 1 : i === w1 - 2 ? .6 : 0, strike: last ? 'whip' : null, extra: last ? 110 : 0, tag: last ? 'hit' : 'extend' });
-  }
-  if (SPR.whip2) { // instant switch to the recoil sheet, reversed
-    const n = SPR.whip2.frames.length;
-    for (let i = n - 1; i >= 0; i--) steps.push({ sheet: 'whip2', f: i, stretch: n > 1 ? i / (n - 1) * .85 : 0, tag: 'recoil' });
-  } else {     // whip_batch2.png not supplied yet: retract by playing batch 1 backwards
-    for (let i = w1 - 2; i >= 0; i--) steps.push({ sheet: 'whip1', f: i, stretch: i === w1 - 2 ? .6 : 0, tag: 'recoil' });
-  }
-  if (SPR.crouch) steps.push({ sheet: 'crouch', f: 0, extra: 550, tag: 'stance', breathe: true });
-  return steps;
+function noise(dur, vol = .3, freq = 1800) {
+  const c = SFX.on && sfxCtx(); if (!c) return;
+  const b = c.createBuffer(1, Math.ceil(c.sampleRate * dur), c.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const s = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
+  f.type = 'lowpass'; f.frequency.value = freq; g.gain.value = vol;
+  s.buffer = b; s.connect(f); f.connect(g); g.connect(c.destination); s.start();
 }
+const sfx = {
+  move: () => tone(520, 640, .06, 'square', .05),
+  pick: () => { tone(330, 990, .18, 'sawtooth', .07); tone(660, 1320, .2, 'square', .04); },
+  whoosh: () => noise(.12, .12, 2600),
+  hit: () => { noise(.1, .45, 1600); tone(160, 60, .14, 'sine', .4); },
+  heavy: () => { noise(.18, .55, 1100); tone(120, 40, .22, 'sine', .5); },
+  block: () => { tone(1400, 900, .07, 'square', .06); noise(.05, .2, 4000); },
+  whip: () => { noise(.09, .25, 5200); tone(1800, 500, .1, 'triangle', .06); },
+  fire: () => { noise(.35, .3, 900); tone(220, 90, .3, 'sawtooth', .08); },
+  ko: () => { tone(200, 40, .9, 'sawtooth', .2); noise(.6, .4, 600); },
+  bell: () => { tone(880, 860, .5, 'triangle', .12); tone(1320, 1300, .4, 'sine', .06); }
+};
 
-/* ---------- 6. player state ---------- */
-const P = { anim: null, steps: [], i: 0, t: 0, playing: true, loop: true, fps: 12, beatMs: 600, holds: true };
-const FX = { sparks: [], popups: [], shake: 0, scroll: 0, flash: 0 };
-const OPP = { hitT: -1, x: 0 };
-const UI = { dist: 520, guides: false, showOpp: true, lastStrike: null };
-
-const baseMs = () => 1000 / P.fps;
-const holdMs = s => (P.anim && P.anim.victory && P.holds ? (s.beats || 0) * P.beatMs : 0);
-const stepMs = s => baseMs() + holdMs(s) + (s.extra || 0);
-const curStep = () => P.steps[P.i];
-
-function selectAnim(id, keepFps) {
-  const A = ANIMS.find(a => a.id === id) || ANIMS[0];
-  if (!A.music) musicPause();                                   // the song belongs to the synced routine
-  P.anim = A; P.steps = A.build(); P.i = 0; P.t = 0; P.playing = A.music ? MUS.playing : true;
-  if (A.music) { MUS.sec = -1; musicUpdate(0); }
-  if (!keepFps) setFps(A.fps);
-  FX.sparks.length = 0; FX.popups.length = 0; OPP.hitT = -1;
-  enterStep(true);
-  syncUI();
-}
-function enterStep() {
-  const s = curStep(); if (!s) return;
-  if (P.anim.music) { renderTimeline(); return; }
-  if (holdMs(s) > 0) pulseBeat();
-  if (s.strike === 'whip') whipStrike();
-  if (s.strike === 'punch') punchStrike();
-  renderTimeline();
-}
-function advance(dir = 1) {
-  const n = P.steps.length;
-  let i = P.i + dir;
-  if (i >= n) { if (!P.loop) { P.playing = false; syncPlay(); return false; } i = 0; }
-  if (i < 0) i = P.loop ? n - 1 : 0;
-  P.i = i; P.t = 0;
-  if (dir > 0) enterStep(); else renderTimeline();
-  return true;
-}
-function update(dt) {
-  if (P.anim && P.anim.music) musicUpdate(dt);                 // the song clock drives the routine
-  else if (P.playing && P.steps.length) {
-    P.t += dt;
-    let guard = 0;
-    while (P.t >= stepMs(curStep()) && guard++ < 50) {
-      const over = P.t - stepMs(curStep());
-      if (!advance(1)) { P.t = stepMs(curStep()); break; }
-      P.t = over;
-    }
-  }
-  if (P.anim && P.anim.scroll && P.playing) FX.scroll = (FX.scroll + dt * .22) % 80;
-  for (const p of FX.sparks) { p.x += p.vx * dt / 16; p.y += p.vy * dt / 16; p.vy += .25 * dt / 16; p.life -= dt; }
-  FX.sparks = FX.sparks.filter(p => p.life > 0);
-  for (const p of FX.popups) { p.y -= .05 * dt; p.life -= dt; }
-  FX.popups = FX.popups.filter(p => p.life > 0);
-  FX.shake = Math.max(0, FX.shake - dt * .04);
-  FX.flash = Math.max(0, FX.flash - dt);
-}
-
-/* ---------- 7. whip + punch mechanics ---------- */
-const oppX = () => HERO_X + UI.dist;
-// stretch factor for a whip frame so the ponytail tip lands on the opponent's body
-function whipStretchFor(F) {
-  if (!F || !F.zone) return 1;
-  const split = HERO_X - F.ax + F.zone.split, tip = HERO_X - F.ax + F.zone.tip, target = oppX() - OPP_BODY * .4;
-  return clamp((target - split) / Math.max(1, tip - split), WHIP_STRETCH[0], WHIP_STRETCH[1]);
-}
-function whipPeak() { const F = SPR.whip1 && SPR.whip1.frames[SPR.whip1.frames.length - 1]; return F; }
-function whipTipX(F, s) { return HERO_X - F.ax + F.zone.split + (F.zone.tip - F.zone.split) * s; }
-function whipStrike() {
-  const F = whipPeak(); if (!F || !F.zone) return;
-  const s = whipStretchFor(F), tip = whipTipX(F, s), hit = tip >= oppX() - OPP_BODY;
-  registerStrike(hit, tip, GROUND - F.h + F.zone.band * .35, 'WHIP!');
-}
-function punchStrike() {
-  const F = SPR.punch.frames[2], fist = HERO_X - F.ax + F.hand[0], hit = fist >= oppX() - OPP_BODY;
-  registerStrike(hit, fist, GROUND - F.h + F.hand[1], 'HIT!');
-}
-function registerStrike(hit, x, y, word) {
-  UI.lastStrike = hit ? 'hit' : 'miss';
-  if (!(P.anim.opp && UI.showOpp)) { UI.lastStrike = null; syncWhipStats(); return; }
-  if (hit) {
-    OPP.hitT = performance.now(); FX.shake = 10; FX.flash = 90;
-    for (let i = 0; i < 26; i++) { const a = rand(0, Math.PI * 2), v = rand(3, 11); FX.sparks.push({ x, y, vx: Math.cos(a) * v - 2, vy: Math.sin(a) * v - 2, life: rand(220, 480), max: 480, c: Math.random() < .5 ? '#fff3c4' : '#ff5468' }); }
-    FX.popups.push({ text: word, x: x + 10, y: y - 40, life: 800, max: 800, c: '#ffd25a' });
-  } else {
-    FX.popups.push({ text: 'MISS', x, y: y - 30, life: 700, max: 700, c: '#9aa3b8' });
-  }
-  syncWhipStats();
-}
-
-/* ---------- 7b. victory music: Web Audio playback + song-driven choreography ----------
-   The song is decoded into an AudioBuffer and played by a looping AudioBufferSourceNode (gap-free repeat).
-   Graph: source -> analyser -> gain (sound toggle) -> speakers; the analyser sits before the gain, so the
-   choreography keeps reacting to the music while the sound is muted.
-   The song clock (AudioContext time) drives everything: sweep sections map song time straight to frames;
-   beat sections advance at an energy-scaled FPS and snap to the next frame on each detected bass beat. */
+/* ---------- 6. Rokaia's victory routine (Web Audio, song-driven choreography) ----------
+   The song is decoded into an AudioBuffer, stretched to exactly 27.0s and played by a looping
+   AudioBufferSourceNode (gap-free repeat). Graph: source -> analyser -> gain -> speakers.
+   The song clock drives everything: sweep sections map song time straight to frames, the 4–8s block is a fixed
+   six-move script, and the beat sections step on the song's tempo, landing on detected drum hits. */
 // move1_crossover.png poses by the side of the screen the extended arm reaches to (right = screen-right).
 // Each scripted move gathers through a crossed-arms frame, then lands on the extended pose.
 const CROSS_RL = { right: [2, 4], left: [0, 6], cross: [7, 1, 3, 5, 7, 1] };
-const SONG_MAP = [ // [start, end) in seconds; the last section runs to the end of the track
-  { t0: 0,  t1: 4,        sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Intro' },
-  { t0: 4,  t1: 8,        sheet: 'cross', mode: 'script', label: 'Victory 1 Crossover (R/L)', part: 'Main beat · R/L',
-    moves: ['right', 'left', 'right', 'left', 'right', 'left'], gather: .3 },  // exactly 6 moves, strictly alternating
-  { t0: 8,  t1: 14,       sheet: 'cross', mode: 'beat',  label: 'Victory 1 Crossover', part: 'Main beat',
-    // frame order (not sheet order): crossed, RIGHT, crossed, LEFT, … by screen side; after move 6 (left) it
-    // starts on crossed arms, so the right-reaching pose comes next and the alternation carries on
+const SONG_MAP = [ // [start, end) in seconds
+  { t0: 0,  t1: 4,  sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep' },
+  // exactly 6 moves, strictly alternating by screen side; they start slow and speed up with the building song
+  // (move lengths in proportion to `pace`: ~0.97s for the first move down to ~0.40s for the last)
+  { t0: 4,  t1: 8,  sheet: 'cross', mode: 'script', label: 'Victory 1 Crossover (R/L, building)',
+    moves: ['right', 'left', 'right', 'left', 'right', 'left'], pace: [1.45, 1.25, 1.05, .9, .75, .6], gather: .3 },
+  // tempo-locked: crossed, RIGHT, crossed, LEFT, … so every beat lands on the other side; it opens on crossed arms
+  // (move 6 was left), so the right-reaching pose comes next and the alternation carries on
+  { t0: 8,  t1: 14, sheet: 'cross', mode: 'beat', label: 'Victory 1 Crossover (on the beat)',
     order: [1, CROSS_RL.right[0], 3, CROSS_RL.left[1], 5, CROSS_RL.right[1], 7, CROSS_RL.left[0]] },
-  { t0: 14, t1: 24,       sheet: 'waist', mode: 'beat',  label: 'Victory 1 Hands on Waist', part: 'Bridge' },
-  { t0: 24, t1: SONG_LOOP_S, sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep', part: 'Finale' }
+  { t0: 14, t1: 24, sheet: 'waist', mode: 'beat', label: 'Victory 1 Hands on Waist' },
+  { t0: 24, t1: SONG_LOOP_S, sheet: 'sweep', mode: 'sweep', label: 'Victory 3 Arms Sweep (finale)' }
 ];
-// share of a sweep section each frame takes: chest gather, arms start (held), opening, opening, full 180°.
+// share of a sweep section each frame takes: chest gather, arms start, opening, opening, full 180°.
 // The full extension arrives in the last ~12% of the section, so it peaks right at 4.0s / at the 27.0s loop point.
 const SWEEP_WEIGHTS = [1, 1.2, .8, .8, .5];
-// beat sections: frames per beat, top speed, and how early (share of the step) a detected hit may trigger the step
 const SONG_BPM = 100;        // felt tempo of the song stretched to 27.0s (~107 BPM original); used until the analyser has its own reading
-const BEAT_FEEL = {
-  cross: { perBeat: 2, maxFps: 4.5, lock: .8 },   // arm out on the beat, crossover on the off-beat: ~3.6 FPS
-  waist: { perBeat: 1, maxFps: 2.2, lock: .85 }   // one sway per main drum/bass hit: ~1.8 FPS
+const BEAT_FEEL = {          // frames per beat, top speed, how early (share of the step) a detected hit may trigger it
+  cross: { perBeat: 2, maxFps: 4.5, lock: .8 },   // arm out on the beat, crossover on the off-beat
+  waist: { perBeat: 1, maxFps: 2.2, lock: .85 }   // one sway per main drum/bass hit
 };
 const MUS = {
-  ctx: null, buf: null, src: null, an: null, gain: null, freq: null, wave: null, el: null,
-  ready: false, loading: null, playing: false, muted: false, startAt: 0, offset: 0, dur: 0, last: 0,
-  sec: -1, lastStep: -1, frame: 0, step: null, energy: 0, peak: .05, bassAvg: 0, lastBeat: -1, beats: [], bpm: 0, bounce: 0, fpsNow: 0
+  ctx: null, buf: null, src: null, an: null, gain: null, freq: null, wave: null, prev: null,
+  ready: false, loading: null, playing: false, startAt: 0, offset: 0, dur: SONG_LOOP_S, srcDur: 0, last: 0,
+  sec: -1, ord: 0, lastStep: -1, frame: 0, move: null, step: null, energy: 0, peak: .05, fluxAvg: 0, lastBeat: -1, beats: [], bpm: 0, bounce: 0
 };
-const musicSections = () => SONG_MAP.map(s => ({ ...s, t1: Math.min(s.t1, MUS.dur || s.t1) })).filter(s => s.t1 > s.t0);
-
 function loadSong() {
   if (MUS.loading) return MUS.loading;
   MUS.loading = (async () => {
-    MUS.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    try { MUS.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return false; }
     MUS.an = MUS.ctx.createAnalyser(); MUS.an.fftSize = 1024; MUS.an.smoothingTimeConstant = .6;
-    MUS.gain = MUS.ctx.createGain(); MUS.gain.gain.value = MUS.muted ? 0 : 1;
+    MUS.gain = MUS.ctx.createGain(); MUS.gain.gain.value = SFX.on ? 1 : 0;
     MUS.an.connect(MUS.gain); MUS.gain.connect(MUS.ctx.destination);
     MUS.freq = new Uint8Array(MUS.an.frequencyBinCount); MUS.wave = new Uint8Array(MUS.an.fftSize);
     for (const dir of ASSET_DIRS) {
@@ -504,20 +393,10 @@ function loadSong() {
         if (!r.ok) continue;
         const raw = await MUS.ctx.decodeAudioData(await r.arrayBuffer());
         MUS.srcDur = raw.duration;
-        $('musicStatus').textContent = `Stretching ${SONG_FILE} to ${SONG_LOOP_S.toFixed(1)}s…`;
         MUS.buf = await timeStretch(raw, Math.round(SONG_LOOP_S * raw.sampleRate));
-        MUS.dur = MUS.buf.duration; MUS.ready = true; MUS.url = dir + SONG_FILE;
+        MUS.dur = MUS.buf.duration; MUS.ready = true;
         return true;
-      } catch (e) { /* next folder (or file:// — fall back to an <audio> element below) */ }
-    }
-    for (const dir of ASSET_DIRS) { // fallback: media element (loops with a tiny gap; analyser may read silence on file://)
-      const el = new Audio(dir + encodeURIComponent(SONG_FILE));
-      const ok = await new Promise(res => { el.onloadedmetadata = () => res(true); el.onerror = () => res(false); });
-      if (!ok) continue;
-      MUS.srcDur = el.duration; el.preservesPitch = true; el.playbackRate = el.duration / SONG_LOOP_S; // same 27.0s loop
-      el.loop = P.loop; MUS.el = el; MUS.dur = SONG_LOOP_S; MUS.ready = true; MUS.url = dir + SONG_FILE;
-      MUS.ctx.createMediaElementSource(el).connect(MUS.an);
-      return true;
+      } catch (e) { /* next folder */ }
     }
     return false;
   })();
@@ -530,7 +409,7 @@ async function timeStretch(buf, outLen) {
   const ch = buf.numberOfChannels, inLen = buf.length, N = 2048, Hs = N / 2, rate = inLen / outLen, TOL = 480, L = N / 2;
   const src = [...Array(ch)].map((_, c) => buf.getChannelData(c));
   const mono = new Float32Array(inLen); for (const s of src) for (let i = 0; i < inLen; i++) mono[i] += s[i] / ch;
-  const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = .5 - .5 * Math.cos(2 * Math.PI * i / N); // periodic Hann: 50% overlaps sum to 1
+  const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = .5 - .5 * Math.cos(2 * Math.PI * i / N); // periodic Hann
   const out = MUS.ctx.createBuffer(ch, outLen, buf.sampleRate), dst = [...Array(ch)].map((_, c) => out.getChannelData(c));
   const at = (a, i) => (i >= 0 && i < inLen ? a[i] : 0), wsum = new Float32Array(outLen);
   let prev = 0;
@@ -549,55 +428,29 @@ async function timeStretch(buf, outLen) {
     for (let i = 0; i < N && o + i < outLen; i++) wsum[o + i] += win[i];
     for (let c = 0; c < ch; c++) for (let i = 0; i < N && o + i < outLen; i++) dst[c][o + i] += at(src[c], pos + i) * win[i];
     prev = pos;
-    if (k % 120 === 119) await new Promise(r => setTimeout(r, 0)); // keep the page responsive
+    if (k % 120 === 119) await new Promise(r => setTimeout(r, 0)); // keep the game responsive
   }
   // divide by the summed window: exact level at the very start and end too (no dip at the 27.0s loop seam)
   for (let i = 0; i < outLen; i++) { const w = Math.max(wsum[i], .05); if (w !== 1) for (let c = 0; c < ch; c++) dst[c][i] /= w; }
-  for (let c = 0; c < ch; c++) for (let i = 0; i < Hs && i < outLen; i++) dst[c][i] = src[c][i]; // first half-grain is the song itself (grain 0 starts at 0)
+  for (let c = 0; c < ch; c++) for (let i = 0; i < Hs && i < outLen; i++) dst[c][i] = src[c][i]; // first half-grain is the song itself
   return out;
 }
-function musicTime() {
-  if (!MUS.ready) return 0;
-  if (MUS.el) return MUS.el.currentTime / MUS.el.playbackRate;
-  if (!MUS.playing) return MUS.offset;
-  const t = MUS.ctx.currentTime - MUS.startAt;
-  return P.loop ? t % MUS.dur : Math.min(t, MUS.dur);
-}
-async function musicPlay() {
-  if (!(await loadSong())) { $('musicStatus').textContent = `${SONG_FILE} not found`; return; }
+const musicTime = () => !MUS.ready ? 0 : !MUS.playing ? MUS.offset : (MUS.ctx.currentTime - MUS.startAt) % MUS.dur;
+async function musicPlay(from = 0) {
+  if (!(await loadSong()) || !MUS.ready) return false;
   if (MUS.ctx.state === 'suspended') await MUS.ctx.resume();
-  if (MUS.playing) return;
-  if (MUS.el) { MUS.el.loop = P.loop; await MUS.el.play(); }
-  else {
-    const src = MUS.ctx.createBufferSource();
-    src.buffer = MUS.buf; src.loop = P.loop; src.connect(MUS.an);
-    const off = MUS.offset >= MUS.dur ? 0 : MUS.offset;
-    src.onended = () => { if (MUS.src === src && !src.loop) { MUS.playing = false; MUS.offset = MUS.dur; P.playing = false; syncPlay(); syncMusic(); } };
-    src.start(0, off); MUS.src = src; MUS.startAt = MUS.ctx.currentTime - off;
-  }
-  MUS.playing = true; P.playing = true; syncPlay(); syncMusic();
+  musicStop();
+  const src = MUS.ctx.createBufferSource();
+  src.buffer = MUS.buf; src.loop = true; src.connect(MUS.an);           // loops seamlessly at 27.0s
+  src.start(0, from); MUS.src = src; MUS.startAt = MUS.ctx.currentTime - from;
+  MUS.playing = true; MUS.sec = -1; MUS.last = from;
+  return true;
 }
-function musicPause() {
-  if (!MUS.playing) return;
-  MUS.offset = musicTime(); MUS.playing = false;
-  if (MUS.el) MUS.el.pause();
-  else if (MUS.src) { const s = MUS.src; MUS.src = null; try { s.stop(); } catch (e) {} }
-  P.playing = false; syncPlay(); syncMusic();
+function musicStop() {
+  if (MUS.src) { const s = MUS.src; MUS.src = null; try { s.stop(); } catch (e) {} }
+  MUS.playing = false; MUS.offset = 0;
 }
-function musicSeek(t) {
-  if (!MUS.ready) return;
-  t = clamp(t, 0, Math.max(0, MUS.dur - .01));
-  MUS.sec = -1; // re-enter the section (resets its beat counter)
-  if (MUS.el) { MUS.el.currentTime = t; return; }
-  const was = MUS.playing;
-  if (was) musicPause();
-  MUS.offset = t;
-  if (was) musicPlay();
-}
-function setLoopMusic() { if (MUS.src) MUS.src.loop = P.loop; if (MUS.el) MUS.el.loop = P.loop; }
-function setMuted(m) { MUS.muted = m; if (MUS.gain) MUS.gain.gain.setTargetAtTime(m ? 0 : 1, MUS.ctx.currentTime, .02); syncMusic(); }
-
-// audio analysis: overall energy (RMS, normalised to the song's own loudest moments) + bass-onset beats
+// audio analysis: overall energy (RMS, normalised to the song's own loudest moments) + onset (drum hit) detection
 function analyse(t) {
   if (!MUS.an || !MUS.playing) { MUS.energy = lerp(MUS.energy, 0, .1); return false; }
   MUS.an.getByteTimeDomainData(MUS.wave); MUS.an.getByteFrequencyData(MUS.freq);
@@ -605,84 +458,393 @@ function analyse(t) {
   const rms = Math.sqrt(sq / MUS.wave.length);
   MUS.peak = Math.max(rms, MUS.peak * .9995, .04);
   MUS.energy = lerp(MUS.energy, clamp(rms / MUS.peak, 0, 1), .25);
-  // onsets by spectral flux: how much the 40 Hz – 2.6 kHz bins rose since the last frame, against an adaptive
-  // threshold (this mix keeps its bass compressed flat, so the kick/snare shows up as rises across the band)
+  // spectral flux: how much the 40 Hz – 2.6 kHz bins rose since the last frame, against an adaptive threshold
+  // (this mix keeps its bass compressed flat, so the kick/snare shows up as rises across the band)
   if (!MUS.prev) MUS.prev = new Uint8Array(MUS.freq.length);
   let flux = 0; for (let i = 1; i <= 60; i++) { const d = MUS.freq[i] - MUS.prev[i]; if (d > 0) flux += d; }
   MUS.prev.set(MUS.freq);
-  const thr = MUS.fluxAvg * 1.6 + 25;
-  const beat = flux > thr && (MUS.lastBeat < 0 || t - MUS.lastBeat > .24 || t < MUS.lastBeat);
+  const beat = flux > MUS.fluxAvg * 1.6 + 25 && (MUS.lastBeat < 0 || t - MUS.lastBeat > .24 || t < MUS.lastBeat);
   MUS.fluxAvg = lerp(MUS.fluxAvg || flux, flux, .08);
   if (beat) {
     if (MUS.lastBeat >= 0 && t > MUS.lastBeat && t - MUS.lastBeat < 1.5) { MUS.beats.push(t - MUS.lastBeat); if (MUS.beats.length > 12) MUS.beats.shift(); }
     let bpm = MUS.beats.length >= 3 ? 60 / [...MUS.beats].sort((a, b) => a - b)[MUS.beats.length >> 1] : 0;
-    while (bpm > 180) bpm /= 2;                                               // report the felt tempo
+    while (bpm > 180) bpm /= 2;                                               // the felt tempo
     if (bpm) MUS.bpm = Math.round(bpm);
     MUS.lastBeat = t;
   }
   return beat;
 }
-// song time -> the frame on stage
+// song time -> the frame on stage (MUS.step)
 function musicUpdate(dt) {
-  const t = musicTime(), secs = musicSections(); if (!secs.length) return;
+  const t = musicTime();
   if (t < MUS.last - .5) MUS.sec = -1;                      // the song looped back to 0.0s: restart the routine
   MUS.last = t;
   const beat = analyse(t);
-  let si = secs.findIndex(s => t >= s.t0 && t < s.t1); if (si < 0) si = secs.length - 1;
-  const S = secs[si], A = SPR[S.sheet], n = A ? A.frames.length : 1;
-  if (si !== MUS.sec) { MUS.sec = si; MUS.ord = 0; MUS.frame = S.order ? S.order[0] : 0; MUS.lastStep = t; P.i = si; renderTimeline(); }
+  let si = SONG_MAP.findIndex(s => t >= s.t0 && t < s.t1); if (si < 0) si = SONG_MAP.length - 1;
+  const S = SONG_MAP[si], A = SPR[S.sheet], n = A ? A.frames.length : 1;
+  if (si !== MUS.sec) { MUS.sec = si; MUS.ord = 0; MUS.frame = S.order ? S.order[0] : 0; MUS.lastStep = t; }
   if (S.mode === 'sweep') {
     // one full 0° -> 180° sweep stretched exactly over the section
     const w = SWEEP_WEIGHTS.slice(0, n), tot = w.reduce((a, b) => a + b, 0);
     let u = clamp((t - S.t0) / (S.t1 - S.t0), 0, .9999) * tot, f = 0;
     while (f < n - 1 && u >= w[f]) u -= w[f++];
-    MUS.frame = f; MUS.fpsNow = n / (S.t1 - S.t0);
+    MUS.frame = f;
   } else if (S.mode === 'script') {
-    // fixed choreography: the section is split evenly into its moves (4s / 6 = 0.67s each); every move spends its
-    // first `gather` share in a crossed-arms frame, then lands on and holds that side's extended pose
-    const D = (S.t1 - S.t0) / S.moves.length, u = (t - S.t0) / D;
-    const m = clamp(Math.floor(u), 0, S.moves.length - 1), side = S.moves[m];
-    const pose = CROSS_RL[side][Math.floor(m / 2) % 2], f = u - m < S.gather ? CROSS_RL.cross[m] : pose;
-    if (f === pose && MUS.frame !== pose) { MUS.bounce = 1; pulseBeat(); }  // a soft settle as the pose lands
-    MUS.frame = f; MUS.move = { i: m, n: S.moves.length, side }; MUS.fpsNow = 2 / D;
+    // fixed choreography: each move's length follows `pace` (scaled to fill the section); a move spends its first
+    // `gather` share in a crossed-arms frame, then lands on and holds that side's extended pose
+    const tot = S.pace.reduce((a, b) => a + b, 0), scale = (S.t1 - S.t0) / tot;
+    let m = 0, start = S.t0;
+    while (m < S.moves.length - 1 && t >= start + S.pace[m] * scale) start += S.pace[m++] * scale;
+    const k = (t - start) / (S.pace[m] * scale), side = S.moves[m];
+    const pose = CROSS_RL[side][Math.floor(m / 2) % 2], f = k < S.gather ? CROSS_RL.cross[m] : pose;
+    if (f === pose && MUS.frame !== pose) MUS.bounce = 1;     // a soft settle as the pose lands
+    MUS.frame = f; MUS.move = { i: m, n: S.moves.length, side };
   } else if (MUS.playing) {
-    // tempo-locked: the pace comes from the song's tempo (BEAT_FEEL frames per beat), energy only nudges it ±12%
-    // and the section's FPS cap keeps it steady. A frame change waits for a detected hit once it is due, so the
-    // moves land on the drums; if no hit comes it steps anyway, so the dance never stalls.
+    // tempo-locked: the pace comes from the song's tempo, energy only nudges it ±12%, the FPS cap keeps it steady.
+    // A step waits for a detected hit once it is due, so the moves land on the drums; it never stalls.
     const B = BEAT_FEEL[S.sheet], T = 60 / (MUS.bpm || SONG_BPM);
     const iv = Math.max(T / B.perBeat * (1.12 - .24 * MUS.energy), 1 / B.maxFps), since = t - MUS.lastStep;
     if (MUS.lastStep < 0 || since < 0) MUS.lastStep = t;
     else if ((beat && since >= iv * B.lock) || since >= iv * 1.5) {
       if (S.order) { MUS.ord = (MUS.ord + 1) % S.order.length; MUS.frame = S.order[MUS.ord]; }
       else MUS.frame = (MUS.frame + 1) % n;
-      MUS.lastStep = t; MUS.bounce = 1; pulseBeat();
+      MUS.lastStep = t; MUS.bounce = 1;
     }
-    MUS.fpsNow = 1 / iv;
   }
   MUS.bounce = Math.max(0, MUS.bounce - dt / 260);
-  const amp = S.mode === 'script' ? 6 : S.sheet === 'cross' ? 12 : S.sheet === 'waist' ? 6 : 0; // toe-bounce on the beat
-  MUS.step = { sheet: S.sheet, f: MUS.frame, lift: Math.sin(MUS.bounce * Math.PI) * amp * (.5 + MUS.energy), section: S, n };
-  syncMusicMeter();
+  const amp = S.mode === 'script' ? 6 : S.sheet === 'cross' ? 12 : S.sheet === 'waist' ? 6 : 0; // toe-bounce
+  MUS.step = { sheet: S.sheet, f: MUS.frame, lift: Math.sin(MUS.bounce * Math.PI) * amp * (.5 + MUS.energy), section: S };
+}
+// Joe's victory song: the original game's track on a plain looping <audio>
+const JOE_MUSIC = { el: null };
+function joeMusicPlay() {
+  if (!JOE_MUSIC.el) { JOE_MUSIC.el = new Audio(JOE_DIRS[0] + JOE_SONG); JOE_MUSIC.el.loop = true; JOE_MUSIC.el.onerror = () => { JOE_MUSIC.el.src = JOE_DIRS[1] + JOE_SONG; }; }
+  JOE_MUSIC.el.currentTime = 0; JOE_MUSIC.el.muted = !SFX.on; JOE_MUSIC.el.play().catch(() => {});
+}
+function joeMusicStop() { if (JOE_MUSIC.el) JOE_MUSIC.el.pause(); }
+function setSound(on) {
+  SFX.on = on;
+  if (MUS.gain) MUS.gain.gain.setTargetAtTime(on ? 1 : 0, MUS.ctx.currentTime, .02);
+  if (JOE_MUSIC.el) JOE_MUSIC.el.muted = !on;
 }
 
-/* ---------- 8. rendering ---------- */
-const cv = $('stage'), ctx = cv.getContext('2d');
-let BG = null, OPP_SPR = null;
+/* ---------- 7. characters ---------- */
+// move timings in 60 Hz ticks; lane = vertical band hit, as shares of STAND_H above the feet
+// (punches + specials are high: crouching ducks them; kicks are low: blocking is the answer).
+// Melee reach is a gameplay number (px in front of the feet), matched between the two so neither art size wins.
+const CHARS = {
+  rokaia: {
+    name: 'ROKAIA', portrait: 'ref1', color: '#ff5468', style: 'Ponytail fighter',
+    moves: [['J', 'Punch'], ['K', 'Ponytail snap'], ['L', 'Ponytail whip (any range)']],
+    atk: {
+      punch:   { start: 6, active: 5, rec: 12, dmg: 8, lane: [.55, .9], stun: 16, reach: () => 185 },
+      kick:    { start: 9, active: 5, rec: 15, dmg: 9, lane: [.35, .8], stun: 18, reach: () => 235 }, // ponytail snap: mid, still hits a crouch
+      special: { start: 20, active: 6, rec: 24, dmg: 18, lane: [.62, .98], stun: 30, knock: true, cool: 240, whip: true }
+    }
+  },
+  joe: {
+    name: 'JOE', portrait: 'joeSel', color: '#ffb000', style: 'Fire ninja',
+    moves: [['J', 'Punch'], ['K', 'Kick'], ['L', 'Fireball']],
+    atk: {
+      punch:   { start: 6, active: 5, rec: 12, dmg: 8, lane: [.55, .9], stun: 16, reach: () => 190 },
+      kick:    { start: 8, active: 5, rec: 16, dmg: 10, lane: [.1, .6], stun: 18, reach: () => 225 },
+      special: { start: 16, active: 1, rec: 24, dmg: 14, cool: 240, fire: true, knock: true, stun: 28 }
+    }
+  }
+};
+const whipReach = (F, s) => F && F.zone ? -F.ax + F.zone.split + (F.zone.tip - F.zone.split) * s : 150;
+// stretch factor so the ponytail tip lands on a target `dist` px in front of her
+function whipStretch(F, dist) {
+  if (!F || !F.zone) return 1;
+  const base = -F.ax + F.zone.split;
+  return clamp((dist - BODY * .4 - base) / Math.max(1, F.zone.tip - F.zone.split), WHIP_STRETCH[0], WHIP_STRETCH[1]);
+}
 
+class Fighter {
+  constructor(id, idx, cpu) {
+    this.id = id; this.C = CHARS[id]; this.idx = idx; this.cpu = cpu; this.wins = 0;
+    this.reset();
+  }
+  reset() {
+    Object.assign(this, { x: this.idx ? 900 : 380, y: GROUND, vx: 0, vy: 0, facing: this.idx ? -1 : 1, hp: 100, shown: 100,
+      atk: null, stun: 0, down: 0, ko: false, cool: 0, flash: 0, walkPh: 0, blocking: false, crouch: false, walking: 0,
+      ai: { t: 0, cmd: {} }, win: false, hitT: 0 });
+  }
+  get onGround() { return this.y >= GROUND; }
+  hurt() { const top = this.crouch && this.onGround ? STAND_H * .5 : STAND_H; return { x1: this.x - BODY, x2: this.x + BODY, y1: this.y - top, y2: this.y }; }
+}
+
+/* ---------- 8. input ---------- */
+const KEYMAP = {
+  ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
+  KeyJ: 'punch', KeyK: 'kick', KeyL: 'special', KeyI: 'block', ShiftLeft: 'block', ShiftRight: 'block'
+};
+const IN = { held: {}, pressed: {}, touch: {} };
+const held = k => !!(IN.held[k] || IN.touch[k]);
+const pressed = k => { const p = IN.pressed[k]; IN.pressed[k] = false; return !!p; };
+addEventListener('keydown', e => {
+  sfxCtx();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+  const a = KEYMAP[e.code];
+  if (a && !IN.held[a]) IN.pressed[a] = true;
+  if (a) IN.held[a] = true;
+  if (!e.repeat) menuKey(e.code);
+});
+addEventListener('keyup', e => { const a = KEYMAP[e.code]; if (a) IN.held[a] = false; });
+addEventListener('blur', () => { IN.held = {}; IN.touch = {}; });
+
+/* ---------- 9. game state ---------- */
+const G = {
+  scene: 'loading', load: 0, error: null, t: 0, focus: 0, help: false, paused: false,
+  pick: 0, picked: -1, pickT: 0, p: null, c: null, round: 1, phase: 'intro', phaseT: 0, timer: ROUND_TIME,
+  projectiles: [], sparks: [], popups: [], shake: 0, slow: 0, banner: null, winner: null, vt: 0
+};
+const ROSTER = ['rokaia', 'joe'];
+function goMenu() { musicStop(); joeMusicStop(); G.scene = 'menu'; G.focus = 0; G.help = false; G.paused = false; showTouch(false); }
+function goSelect() { musicStop(); joeMusicStop(); G.scene = 'select'; G.picked = -1; G.paused = false; showTouch(false); loadSong(); }
+function startMatch(id) {
+  const cpuId = ROSTER.find(r => r !== id);
+  G.p = new Fighter(id, 0, false); G.c = new Fighter(cpuId, 1, true);
+  G.round = 1; G.scene = 'fight'; G.paused = false;
+  startRound();
+  showTouch(IS_TOUCH);
+}
+function startRound() {
+  G.p.reset(); G.c.reset();
+  IN.pressed = {};                                   // a key used in the menus doesn't fire an attack
+  G.projectiles = []; G.sparks = []; G.popups = [];
+  G.phase = 'intro'; G.phaseT = 0; G.timer = ROUND_TIME; G.slow = 0;
+  G.banner = { text: `ROUND ${G.round}`, t: 0, len: 80 };
+  sfx.bell();
+}
+function endRound(winner) {
+  if (G.phase !== 'fight') return;
+  G.phase = 'ko'; G.phaseT = 0; G.winner = winner;
+  G.slow = 50; G.shake = 16;
+  G.banner = { text: winner ? 'K.O.' : 'DRAW', t: 0, len: 150, red: true };
+  sfx.ko();
+}
+function startVictory(w) {
+  G.scene = 'victory'; G.vt = 0; G.focus = 0; G.winner = w; showTouch(false);
+  const l = w === G.p ? G.c : G.p;
+  w.x = W * .4; w.y = GROUND; w.facing = 1; l.x = W * .68; l.y = GROUND; l.facing = -1;
+  if (w.id === 'rokaia') musicPlay(0); else joeMusicPlay();
+}
+
+/* ---------- 10. fighting ---------- */
+function control(f, o) {
+  if (!f.cpu) return { left: held('left'), right: held('right'), up: pressed('up'), down: held('down'), punch: pressed('punch'), kick: pressed('kick'), special: pressed('special'), block: held('block') };
+  return cpuThink(f, o);
+}
+// CPU: re-decides every few ticks — close the distance, poke, block what it sees coming, duck fireballs/whips
+function cpuThink(f, o) {
+  const A = f.ai, dist = Math.abs(o.x - f.x), toward = o.x > f.x ? 'right' : 'left', away = toward === 'right' ? 'left' : 'right';
+  const cmd = { left: false, right: false, up: false, down: false, punch: false, kick: false, special: false, block: false };
+  if (A.t-- > 0) { Object.assign(cmd, A.hold); return cmd; }
+  A.t = 8 + (Math.random() * 12 | 0); A.hold = {};
+  const threat = G.projectiles.some(p => p.owner === o && Math.sign(f.x - p.x) === Math.sign(p.vx) && Math.abs(f.x - p.x) < 420)
+    || (o.atk && o.atk.type === 'special' && o.atk.t < o.C.atk.special.start);
+  const reach = Math.min(f.C.atk.punch.reach(), f.C.atk.kick.reach()) + BODY;
+  const r = Math.random();
+  if (threat && r < .7) { A.hold = { down: true }; A.t = 22; }
+  else if (o.atk && o.atk.type !== 'special' && dist < 300 && r < .45) { A.hold = { block: true }; A.t = 16; }
+  else if (dist > reach + 30) {
+    if (f.cool <= 0 && r < .22) cmd.special = true;
+    else if (r < .08) { cmd.up = true; A.hold = { [toward]: true }; }
+    else A.hold = { [toward]: true };
+  } else {
+    if (r < .42) cmd.punch = true;
+    else if (r < .74) cmd.kick = true;
+    else if (r < .86) { A.hold = { block: true }; A.t = 14; }
+    else if (r < .93 && f.cool <= 0) cmd.special = true;
+    else A.hold = { [away]: true };
+  }
+  Object.assign(cmd, A.hold);
+  return cmd;
+}
+function startAttack(f, type) { f.atk = { type, t: 0, hit: false }; if (type !== 'special') sfx.whoosh(); }
+function updateFighter(f, o) {
+  if (f.flash > 0) f.flash--;
+  if (f.cool > 0) f.cool--;
+  f.blocking = false; f.walking = 0;
+  const canAct = G.phase === 'fight' && !f.ko;
+  if (f.ko) { /* falls, stays down */ }
+  else if (f.down > 0) { f.down--; f.crouch = false; }
+  else if (f.stun > 0) f.stun--;
+  else if (f.atk) {
+    const a = f.atk, d = f.C.atk[a.type];
+    a.t++;
+    if (f.onGround) f.vx = 0;
+    if (a.type === 'special' && d.fire && a.t === d.start) fireball(f);
+    if (a.type === 'special' && d.whip && a.t === d.start) sfx.whip();
+    if (!d.fire && !a.hit && a.t > d.start && a.t <= d.start + d.active) tryHit(f, o, a, d); // the fireball hits on its own
+    if (a.t >= d.start + d.active + d.rec) f.atk = null;
+  } else if (canAct) {
+    const c = control(f, o);
+    if (f.onGround) f.facing = o.x >= f.x ? 1 : -1;
+    f.crouch = f.onGround && c.down;
+    if (c.special && f.cool <= 0 && f.onGround) { startAttack(f, 'special'); f.cool = f.C.atk.special.cool; f.crouch = false; }
+    else if (c.punch) { startAttack(f, 'punch'); f.crouch = false; }
+    else if (c.kick) { startAttack(f, 'kick'); f.crouch = false; }
+    else if (c.block && f.onGround) { f.blocking = true; f.vx = 0; }
+    else {
+      const dir = f.crouch ? 0 : (c.right ? 1 : 0) - (c.left ? 1 : 0);
+      if (f.onGround) { f.vx = dir * (dir === f.facing ? 6 : 4.6); f.walking = dir; if (dir) f.walkPh += Math.abs(f.vx) * .011 * (dir === f.facing ? 1 : -1); } // ~9 walk frames / s
+      if (c.up && f.onGround) { f.vy = -21; f.vx = dir * 6.5; sfx.whoosh(); }
+    }
+  } else if (f.onGround) f.vx *= .8;
+  // physics
+  if (!f.onGround || f.vy < 0) f.vy += 1.1;
+  f.x += f.vx; f.y += f.vy;
+  if (f.y >= GROUND) { if (f.vy > 8) shake(f.ko ? 10 : 3); f.y = GROUND; f.vy = 0; if (f.ko || f.down) f.vx *= .7; }
+  f.x = clamp(f.x, 90, W - 90);
+  f.shown = f.shown > f.hp ? Math.max(f.hp, f.shown - .4) : f.hp;
+}
+function separate(a, b) {
+  if (a.ko || b.ko || Math.abs(a.y - b.y) > STAND_H * .5) return;
+  const d = b.x - a.x, min = 2 * BODY + 10;
+  if (Math.abs(d) < min) { const push = (min - Math.abs(d)) / 2 * (Math.sign(d) || 1); a.x = clamp(a.x - push, 90, W - 90); b.x = clamp(b.x + push, 90, W - 90); }
+}
+// melee / whip hit test: horizontal reach in front of the attacker + vertical lane overlap with the target's hurtbox
+function tryHit(f, o, a, d) {
+  const dist = (o.x - f.x) * f.facing;
+  if (dist < 0) return;
+  let reach;
+  if (d.whip) { const F = SPR.whip1.frames[3]; reach = whipReach(F, whipStretch(F, dist)); }
+  else reach = d.reach();
+  const hb = o.hurt(), top = f.y - STAND_H * d.lane[1], bot = f.y - STAND_H * d.lane[0];
+  if (dist - BODY > reach || bot < hb.y1 || top > hb.y2) return;
+  a.hit = true;
+  strike(f, o, d, f.x + f.facing * Math.min(reach, dist - BODY * .6), (Math.max(top, hb.y1) + Math.min(bot, hb.y2)) / 2);
+}
+function strike(f, o, d, x, y) {
+  if (o.ko || G.phase !== 'fight') return;
+  const guarded = o.blocking && Math.sign(f.x - o.x) === o.facing;
+  if (guarded) {
+    o.hp = Math.max(0, o.hp - Math.ceil(d.dmg * .15)); o.vx = -o.facing * 4; o.flash = 4;
+    burst(x, y, ['#9fd4ff', '#ffffff'], 10); sfx.block(); popup('BLOCK', o.x, o.y - STAND_H - 20, '#9fd4ff', 30);
+  } else {
+    o.hp = Math.max(0, o.hp - d.dmg); o.atk = null; o.flash = 8; o.hitT = G.t;
+    o.stun = d.stun; o.vx = -o.facing * (d.knock ? 9 : 5);
+    if (d.knock) { o.vy = -9; o.down = 46; o.stun = 0; }
+    burst(x, y, d.knock ? ['#fff3c4', '#ff5468', '#ffb000'] : ['#ffffff', '#ffd25a', '#ff5468'], d.knock ? 30 : 16);
+    d.knock ? sfx.heavy() : sfx.hit(); shake(d.knock ? 12 : 5);
+    popup(d.whip ? 'WHIPPED!' : d.fire ? 'BURNED!' : `-${d.dmg}`, o.x, o.y - STAND_H - 20, d.knock ? '#ffd25a' : '#ffffff', d.knock ? 44 : 30);
+  }
+  if (o.hp <= 0) { o.ko = true; o.vy = -12; o.vx = -o.facing * 8; o.stun = 0; o.down = 0; endRound(f); }
+}
+function fireball(f) {
+  const F = SPR.jPunch.frames[0];
+  G.projectiles.push({ owner: f, x: f.x + f.facing * (F.hand[0] - F.ax + 10), y: f.y - STAND_H * .68, vx: f.facing * 11, t: 0, d: f.C.atk.special });
+  sfx.fire();
+}
+function updateProjectiles() {
+  for (const p of G.projectiles) {
+    p.t++; p.x += p.vx;
+    if (Math.random() < .8) G.sparks.push({ x: p.x - p.vx * rand(0, 1.5), y: p.y + rand(-16, 16), vx: -p.vx * .1, vy: rand(-1.2, .4), life: rand(240, 420), max: 420, c: Math.random() < .5 ? '#ff6a1a' : '#ffc040', size: rand(4, 9), glow: true });
+    const o = p.owner === G.p ? G.c : G.p, hb = o.hurt();
+    if (!o.ko && p.x + 22 > hb.x1 && p.x - 22 < hb.x2 && p.y + 22 > hb.y1 && p.y - 22 < hb.y2) { p.dead = true; strike(p.owner, o, p.d, p.x, p.y); }
+    if (p.x < -60 || p.x > W + 60) p.dead = true;
+  }
+  G.projectiles = G.projectiles.filter(p => !p.dead);
+}
+function fightTick() {
+  const { p, c } = G;
+  G.phaseT++;
+  if (G.phase === 'intro') {
+    if (G.phaseT === 80) { G.banner = { text: 'FIGHT!', t: 0, len: 50, red: true }; sfx.bell(); }
+    if (G.phaseT >= 110) G.phase = 'fight';
+  } else if (G.phase === 'fight') {
+    if (G.phaseT % 60 === 0) G.timer = Math.max(0, G.timer - 1);
+    if (G.timer <= 0) endRound(p.hp === c.hp ? null : p.hp > c.hp ? p : c);
+  } else if (G.phase === 'ko') {
+    if (G.phaseT === 100 && G.winner) { G.winner.wins++; G.winner.win = true; G.banner = { text: `${G.winner.C.name} WINS`, t: 0, len: 110 }; }
+    if (G.phaseT >= 230) {
+      const champ = [p, c].find(f => f.wins >= ROUNDS_TO_WIN);
+      if (champ) return startVictory(champ);
+      G.round++; startRound();
+    }
+  }
+  updateFighter(p, c); updateFighter(c, p); separate(p, c);
+  updateProjectiles();
+}
+
+/* ---------- 11. effects ---------- */
+function shake(m) { G.shake = Math.max(G.shake, m); }
+function burst(x, y, colors, n) {
+  for (let i = 0; i < n; i++) { const a = rand(0, Math.PI * 2), v = rand(3, 11); G.sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: rand(220, 480), max: 480, c: colors[i % colors.length], size: 4, grav: true }); }
+}
+function popup(text, x, y, c, size) { G.popups.push({ text, x, y, c, size, life: 800, max: 800 }); }
+function updateFx(dt) {
+  for (const s of G.sparks) { s.x += s.vx * dt / 16; s.y += s.vy * dt / 16; if (s.grav) s.vy += .25 * dt / 16; s.life -= dt; }
+  G.sparks = G.sparks.filter(s => s.life > 0);
+  for (const p of G.popups) { p.y -= .05 * dt; p.life -= dt; }
+  G.popups = G.popups.filter(p => p.life > 0);
+  G.shake = Math.max(0, G.shake - dt * .04);
+  if (G.banner) { G.banner.t += dt / TICK; if (G.banner.t > G.banner.len) G.banner = null; }
+}
+
+/* ---------- 12. poses: game state -> [sheet, frame] ---------- */
+function rokaiaPose(f) {
+  const a = f.atk;
+  if (f.ko) return f.onGround ? { s: 'ko', i: f.vy === 0 && Math.abs(f.vx) < .5 ? 2 : 1 } : { s: 'ko', i: 0 };
+  if (f.down > 0) return f.onGround ? { s: f.down > 18 ? 'ko' : 'crouch', i: f.down > 18 ? 1 : 1 } : { s: 'ko', i: 0 };
+  if (f.stun > 0) { const L = 16; return { s: 'hit', i: f.stun > L * .6 ? 0 : f.stun > L * .25 ? 1 : 2 }; }
+  if (a) {
+    const d = f.C.atk[a.type], t = a.t;
+    if (a.type === 'punch') return { s: 'punch', i: t < d.start * .5 ? 0 : t <= d.start ? 1 : t <= d.start + d.active ? 2 : 3 };
+    if (a.type === 'kick') return t <= d.start ? { s: 'whip1', i: 1 } : t <= d.start + d.active + 4 ? { s: 'whip1', i: 2 } : { s: 'crouch', i: 0 };
+    // ponytail whip: wind up, flick, arc, full extension stretched to the opponent; recoil back to her stance
+    const dist = Math.abs(G.c && G.p ? (f === G.p ? G.c : G.p).x - f.x : 400), s = whipStretch(SPR.whip1.frames[3], dist);
+    if (t < 7) return { s: 'whip1', i: 0 };
+    if (t < 14) return { s: 'whip1', i: 1 };
+    if (t <= d.start) return { s: 'whip1', i: 2, stretch: lerp(1, s, .6) };
+    if (t <= d.start + d.active) return { s: 'whip1', i: 3, stretch: s };
+    const r = (t - d.start - d.active) / d.rec, W2 = SPR.whip2;
+    if (W2) { const n = W2.frames.length, i = clamp(n - 1 - Math.floor(r * n), 0, n - 1); return { s: 'whip2', i, stretch: lerp(1, s, i / Math.max(1, n - 1) * .85) }; }
+    return r < .45 ? { s: 'whip1', i: 2, stretch: lerp(1, s, .6) } : { s: 'whip1', i: 1 };
+  }
+  if (!f.onGround) return { s: 'jump', i: f.vy < -8 ? 1 : f.vy < 8 ? 2 : 3 };
+  if (f.blocking) return { s: 'block', i: 1 };
+  if (f.crouch) return { s: 'crouch', i: 2 };
+  if (f.walking) return { s: 'walk', i: ((Math.floor(f.walkPh * 2.2) % 5) + 5) % 5 };
+  if (f.win) return { s: 'sweep', i: 4 };
+  return { s: 'crouch', i: 0, breathe: true };
+}
+function joePose(f) {
+  const a = f.atk;
+  if (f.ko || f.down > 0) { // knocked back onto his knees, slumped backwards (his art has no lying pose)
+    const fall = f.ko ? Math.min(1, (G.t - f.hitT) / 18) : f.down > 14 ? 1 : f.down / 14;
+    return { s: 'jCrouch', i: 0, rot: -.16 * fall, dim: f.ko };
+  }
+  if (f.stun > 0) return { s: 'jIdle', i: 0, rot: -.14 * Math.min(1, f.stun / 8) };
+  if (a) {
+    const d = f.C.atk[a.type], t = a.t;
+    if (a.type === 'special') return t < d.start ? { s: 'jCrouch', i: 0, charge: t / d.start } : { s: 'jPunch', i: 0 };
+    const key = a.type === 'punch' ? 'jPunch' : 'jKick';
+    return t < d.start * .5 || t > d.start + d.active + d.rec * .6 ? { s: 'jIdle', i: 0 } : { s: key, i: 0 };
+  }
+  if (!f.onGround) return { s: 'jCrouch', i: 0 };
+  if (f.crouch) return { s: 'jCrouch', i: 0 };
+  if (f.walking) return { s: 'jIdle', i: 0, dy: -Math.abs(Math.sin(f.walkPh * 3)) * 8 };
+  if (f.win) return { s: G.t % 50 < 25 ? 'jPunch' : 'jIdle', i: 0 };
+  return { s: 'jIdle', i: 0, breathe: true };
+}
+const poseOf = f => f.id === 'rokaia' ? rokaiaPose(f) : joePose(f);
+
+/* ---------- 13. rendering ---------- */
+const cv = $('stage'), ctx = cv.getContext('2d');
+let BG = null;
 function buildBackground() {
   const c = mk(W, H), g = c.getContext('2d');
   const sky = g.createLinearGradient(0, 0, 0, GROUND);
   sky.addColorStop(0, '#120d1c'); sky.addColorStop(.6, '#22162e'); sky.addColorStop(1, '#3a1a2c');
   g.fillStyle = sky; g.fillRect(0, 0, W, GROUND);
-  // paper lanterns + a big moon for the dojo mood
   const moon = g.createRadialGradient(W * .72, 170, 10, W * .72, 170, 150);
   moon.addColorStop(0, 'rgba(255,214,170,.55)'); moon.addColorStop(.45, 'rgba(255,120,110,.15)'); moon.addColorStop(1, 'rgba(255,120,110,0)');
   g.fillStyle = moon; g.fillRect(0, 0, W, GROUND);
   g.fillStyle = 'rgba(255,220,190,.85)'; g.beginPath(); g.arc(W * .72, 170, 58, 0, 7); g.fill();
-  for (let i = 0; i < 6; i++) { // back wall pillars
-    const x = 60 + i * 230;
-    g.fillStyle = 'rgba(10,6,14,.55)'; g.fillRect(x, 90, 26, GROUND - 90);
-  }
+  for (let i = 0; i < 6; i++) { g.fillStyle = 'rgba(10,6,14,.55)'; g.fillRect(60 + i * 230, 90, 26, GROUND - 90); }
   g.fillStyle = 'rgba(10,6,14,.7)'; g.fillRect(0, 70, W, 26);
   for (let i = 0; i < 5; i++) {
     const x = 175 + i * 230, y = 150;
@@ -694,50 +856,37 @@ function buildBackground() {
   const floor = g.createLinearGradient(0, GROUND, 0, H);
   floor.addColorStop(0, '#3a2430'); floor.addColorStop(1, '#140c12');
   g.fillStyle = floor; g.fillRect(0, GROUND, W, H - GROUND);
+  g.strokeStyle = 'rgba(255,190,170,.07)'; g.lineWidth = 2;
+  for (let x = -200; x < W + 200; x += 90) { g.beginPath(); g.moveTo(x, GROUND); g.lineTo(x + (x - W / 2) * .5, H); g.stroke(); }
   g.fillStyle = 'rgba(255,170,150,.25)'; g.fillRect(0, GROUND, W, 2);
   const vig = g.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * .95);
   vig.addColorStop(0, 'rgba(0,0,0,0)'); vig.addColorStop(1, 'rgba(0,0,0,.55)');
   g.fillStyle = vig; g.fillRect(0, 0, W, H);
   return c;
 }
-// training partner: Rokaia's stance + hit frames, recoloured cool grey-blue so the two read apart
-function buildOpponent() {
-  const tint = S => {
-    if (!S || RAW_MODE) return S;
-    const c = mk(S.strip.width, S.strip.height), g = c.getContext('2d'); g.drawImage(S.strip, 0, 0);
-    const id = g.getImageData(0, 0, c.width, c.height), d = id.data;
-    for (let i = 0; i < d.length; i += 4) {
-      if (!d[i + 3]) continue;
-      const l = .3 * d[i] + .59 * d[i + 1] + .11 * d[i + 2];
-      d[i] = lerp(d[i], l * .7, .7); d[i + 1] = lerp(d[i + 1], l * .82, .7); d[i + 2] = lerp(d[i + 2], l * 1.15 + 12, .7);
-    }
-    g.putImageData(id, 0, 0);
-    return Object.assign({}, S, { strip: c });
-  };
-  return { stance: tint(SPR.crouch), hit: tint(SPR.hit) };
-}
-
+// one frame, feet at (x, y). stretch: the ponytail band in front of her is stretched horizontally (the whip);
+// rot: rotation around the feet (falling over); flash: brightened copy on top (hit flash)
 function drawFrame(S, F, x, y, o = {}) {
   if (!S || !F) return;
-  const sc = o.scale || 1, stretch = o.stretch || 1;
+  const stretch = o.stretch || 1;
   ctx.save();
   ctx.imageSmoothingEnabled = false;          // crisp: frames are pre-resized, drawn 1:1
   ctx.translate(Math.round(x), Math.round(y));
   if (o.flip) ctx.scale(-1, 1);
-  if (sc !== 1) ctx.scale(sc, sc);
+  if (o.rot) { ctx.translate(0, -Math.abs(Math.sin(o.rot)) * F.ax); ctx.rotate(o.rot); } // keep the body on the floor as it tips
+  if (o.scale) ctx.scale(o.scale, o.scale);
   if (o.alpha != null) ctx.globalAlpha = o.alpha;
   const ox = Math.round(-F.ax), oy = -F.h, Z = F.zone;
-  if (stretch !== 1 && Z) {
-    // the ponytail whip: everything left of the split + the body below the band as drawn; the band in front of
-    // her is stretched horizontally so the tip meets the opponent
-    const sp = Z.split, bd = Z.band, rw = F.w - sp;
-    ctx.drawImage(S.strip, F.sX, F.sY, sp, F.h, ox, oy, sp, F.h);
-    ctx.drawImage(S.strip, F.sX + sp, F.sY + bd, rw, F.h - bd, ox + sp, oy + bd, rw, F.h - bd);
-    ctx.drawImage(S.strip, F.sX + sp, F.sY, rw, bd, ox + sp, oy, Math.round(rw * stretch), bd);
-  } else {
-    ctx.drawImage(S.strip, F.sX, F.sY, F.w, F.h, ox, oy, F.w, F.h);
-  }
-  if (o.flash) { ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = o.flash; ctx.drawImage(S.strip, F.sX, F.sY, F.w, F.h, ox, oy, F.w, F.h); }
+  const draw = () => {
+    if (stretch !== 1 && Z) {
+      const sp = Z.split, bd = Z.band, rw = F.w - sp;
+      ctx.drawImage(S.strip, F.sX, F.sY, sp, F.h, ox, oy, sp, F.h);
+      ctx.drawImage(S.strip, F.sX + sp, F.sY + bd, rw, F.h - bd, ox + sp, oy + bd, rw, F.h - bd);
+      ctx.drawImage(S.strip, F.sX + sp, F.sY, rw, bd, ox + sp, oy, Math.round(rw * stretch), bd);
+    } else ctx.drawImage(S.strip, F.sX, F.sY, F.w, F.h, ox, oy, F.w, F.h);
+  };
+  draw();
+  if (o.flash) { ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = o.flash; draw(); }
   ctx.restore();
 }
 function shadow(x, w, a = .45) {
@@ -746,353 +895,306 @@ function shadow(x, w, a = .45) {
   ctx.save(); ctx.translate(x, GROUND + 4); ctx.scale(1, .18); ctx.translate(-x, -(GROUND + 4));
   ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, GROUND + 4, w, 0, 7); ctx.fill(); ctx.restore();
 }
-
-function render(now) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-  if (FX.shake > 0) ctx.translate(rand(-FX.shake, FX.shake), rand(-FX.shake, FX.shake) * .6);
-  if (BG) ctx.drawImage(BG, 0, 0);
-  if (P.anim && P.anim.scroll) { // floor boards slide back while walking
-    ctx.strokeStyle = 'rgba(255,190,170,.08)'; ctx.lineWidth = 2;
-    for (let x = -80 + (80 - FX.scroll); x < W + 80; x += 80) { ctx.beginPath(); ctx.moveTo(x, GROUND); ctx.lineTo(x - 140, H); ctx.stroke(); }
-  }
-  const A = P.anim, s = A && A.music ? MUS.step : curStep();
-  if (!s || !A) return;
-  const S = SPR[s.sheet], F = S && S.frames[Math.min(s.f, S.frames.length - 1)];
-  const dur = A.music ? 1 : stepMs(s), k = A.music ? 0 : clamp(P.t / dur, 0, 1), base = baseMs();
-
-  if (A.ref) { drawReference(S, F); drawHud(s, A, dur); return; }
-
-  // training partner (whip / punch)
-  const showOpp = A.opp && UI.showOpp && OPP_SPR && OPP_SPR.stance;
-  if (showOpp) drawOpponent(now);
-
-  // hero
-  let y = GROUND, scale = 1, x = HERO_X;
-  if (s.dy != null) { const nx = P.steps[(P.i + 1) % P.steps.length]; y += lerp(s.dy, nx.dy != null ? nx.dy : 0, ease(k)); }
-  if (s.bounce && P.anim.victory) { const t = clamp(P.t / Math.min(dur, 420), 0, 1); y -= Math.sin(Math.PI * t) * s.bounce; } // toe-bounce
-  if (s.breathe) y += Math.round(Math.sin(now / 420) * 2);
-  if (s.lift) y -= s.lift;                                     // music: toe-bounce on each beat
-  if (!A.music && holdMs(s) > 0 && P.t > base) { const ht = (P.t - base) / holdMs(s); scale = 1 + .012 * Math.max(0, 1 - ht * 4); } // heartbeat thump
-  const lift = GROUND - y;
-  shadow(x, F ? F.w * .42 : 90, lift > 0 ? .45 * Math.max(.25, 1 - lift / 300) : .45);
-  let stretch = 1;
-  if (A.whip && F && F.zone && s.stretch) stretch = lerp(1, whipStretchFor(whipPeak()), s.stretch);
-  drawFrame(S, F, x, y, { scale, stretch });
-
-  if (UI.guides) drawGuides(S, F, x, y, stretch);
-  drawFx();
-  if (FX.flash > 0) { ctx.fillStyle = `rgba(255,240,220,${FX.flash / 90 * .18})`; ctx.fillRect(0, 0, W, H); }
-  drawHud(s, A, dur);
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function title(text, x, y, size, fill = '#fff', stroke = '#3a0610', align = 'center') {
+  ctx.save(); ctx.font = `900 ${size}px Impact, "Arial Black", sans-serif`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(4, size * .12); ctx.strokeStyle = stroke; ctx.strokeText(text, x, y);
+  ctx.fillStyle = fill; ctx.fillText(text, x, y); ctx.restore();
 }
-function drawOpponent(now) {
-  const ox = oppX(), since = OPP.hitT < 0 ? Infinity : now - OPP.hitT, HIT_LEN = 620;
-  shadow(ox, 90);
-  if (since < HIT_LEN && OPP_SPR.hit) {
-    const i = Math.min(2, Math.floor(since / HIT_LEN * 3)), F = OPP_SPR.hit.frames[i];
-    const push = Math.sin(Math.min(1, since / 260) * Math.PI / 2) * 26 * (1 - since / HIT_LEN);
-    drawFrame(OPP_SPR.hit, F, ox + push, GROUND, { flip: true, flash: since < 90 ? .55 : 0 });
-  } else {
-    drawFrame(OPP_SPR.stance, OPP_SPR.stance.frames[0], ox, GROUND + Math.round(Math.sin(now / 380) * 1.5), { flip: true });
-  }
-}
-function drawReference(S, F) {
+function drawFighter(f, now) {
+  const P = poseOf(f), S = SPR[P.s], F = S && S.frames[Math.min(P.i, S.frames.length - 1)];
   if (!F) return;
-  if (P.anim.portrait) {
-    // character-select card: portrait in a glowing frame with a name plate
-    const fi = FIGHTERS.find(f => f.id === P.anim.fighter), cw = F.w + 40, ch = F.h + 40, cx = W / 2 - cw / 2, cy = H / 2 - ch / 2 - 14;
-    ctx.save();
-    ctx.shadowColor = 'rgba(255,84,104,.55)'; ctx.shadowBlur = 30;
-    const bg = ctx.createLinearGradient(0, cy, 0, cy + ch); bg.addColorStop(0, '#2a1622'); bg.addColorStop(1, '#0c0810');
-    ctx.fillStyle = bg; roundRect(cx, cy, cw, ch, 14); ctx.fill();
-    ctx.shadowBlur = 0; ctx.strokeStyle = '#ff5468'; ctx.lineWidth = 3; ctx.stroke();
-    ctx.restore();
-    drawFrame(S, F, W / 2 - F.w / 2 + F.ax, cy + 20 + F.h);
-    if (fi) {
-      ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#d3263a'; roundRect(W / 2 - 130, cy + ch - 24, 260, 48, 8); ctx.fill();
-      ctx.font = '900 34px Impact, "Arial Black", sans-serif'; ctx.fillStyle = '#fff'; ctx.lineWidth = 5; ctx.strokeStyle = '#3a0610';
-      ctx.strokeText(fi.name, W / 2, cy + ch); ctx.fillText(fi.name, W / 2, cy + ch);
-      ctx.restore();
-    }
-  } else {
-    shadow(W / 2, F.w * .45);
-    drawFrame(S, F, W / 2, GROUND);
+  const air = GROUND - f.y;
+  shadow(f.x, (P.rot ? F.h * .5 : F.w * .42), .45 * Math.max(.3, 1 - air / 320));
+  let y = f.y + (P.dy || 0);
+  if (P.breathe) y += Math.round(Math.sin(now / 420 + f.idx * 2) * 2);
+  drawFrame(S, F, f.x, y, { flip: f.facing < 0, stretch: P.stretch, rot: P.rot, flash: f.flash > 0 ? .5 : 0, alpha: P.dim ? .85 : null });
+  if (P.charge) { // Joe's fireball gathering in his fists
+    const hx = f.x + f.facing * 60, hy = f.y - STAND_H * .62, r = 10 + 26 * P.charge;
+    const gl = ctx.createRadialGradient(hx, hy, 1, hx, hy, r * 2);
+    gl.addColorStop(0, 'rgba(255,245,200,.95)'); gl.addColorStop(.4, 'rgba(255,140,30,.7)'); gl.addColorStop(1, 'rgba(255,60,0,0)');
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(hx, hy, r * 2, 0, 7); ctx.fill(); ctx.restore();
+  }
+  if (f.blocking) { // guard glow in front of the fighter
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = 'rgba(120,200,255,.55)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.ellipse(f.x + f.facing * 70, f.y - STAND_H * .55, 26, STAND_H * .34, 0, f.facing > 0 ? -1.2 : Math.PI - 1.2, f.facing > 0 ? 1.2 : Math.PI + 1.2); ctx.stroke(); ctx.restore();
   }
 }
-function drawGuides(S, F, x, y, stretch) {
-  ctx.save(); ctx.lineWidth = 1.5;
-  ctx.strokeStyle = 'rgba(80,220,255,.9)'; ctx.beginPath(); ctx.moveTo(x - 14, y); ctx.lineTo(x + 14, y); ctx.moveTo(x, y - 14); ctx.lineTo(x, y + 6); ctx.stroke();
-  if (F) { ctx.strokeStyle = 'rgba(80,220,255,.35)'; ctx.strokeRect(Math.round(x - F.ax) + .5, y - F.h + .5, F.w, F.h); }
-  if (F && F.zone && P.anim.whip) {
-    const sx = x - F.ax + F.zone.split, tip = x - F.ax + F.zone.split + (F.zone.tip - F.zone.split) * stretch;
-    ctx.strokeStyle = 'rgba(255,200,90,.9)'; ctx.setLineDash([6, 5]);
-    ctx.beginPath(); ctx.moveTo(sx, y - F.h); ctx.lineTo(sx, y - F.h + F.zone.band); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(tip, y - F.h - 10); ctx.lineTo(tip, y - F.h + F.zone.band); ctx.stroke();
-    ctx.setLineDash([]);
+function drawProjectiles() {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const p of G.projectiles) {
+    const R = 30 + Math.sin(p.t * .5) * 4, gl = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, R * 1.8);
+    gl.addColorStop(0, 'rgba(255,255,225,1)'); gl.addColorStop(.25, 'rgba(255,200,70,.95)'); gl.addColorStop(.6, 'rgba(255,70,15,.75)'); gl.addColorStop(1, 'rgba(150,0,0,0)');
+    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(p.x, p.y, R * 1.8, 0, 7); ctx.fill();
   }
-  if (P.anim.opp && UI.showOpp) { ctx.strokeStyle = 'rgba(255,90,100,.8)'; ctx.strokeRect(oppX() - OPP_BODY + .5, GROUND - STAND_H + .5, OPP_BODY * 2, STAND_H); }
-  ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.beginPath(); ctx.moveTo(0, GROUND + .5); ctx.lineTo(W, GROUND + .5); ctx.stroke();
   ctx.restore();
 }
 function drawFx() {
   ctx.save(); ctx.globalCompositeOperation = 'lighter';
-  for (const p of FX.sparks) { ctx.globalAlpha = clamp(p.life / p.max, 0, 1); ctx.fillStyle = p.c; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  for (const s of G.sparks) { ctx.globalAlpha = clamp(s.life / s.max, 0, 1); ctx.fillStyle = s.c; const z = s.size || 4; ctx.fillRect(s.x - z / 2, s.y - z / 2, z, z); }
   ctx.restore();
-  ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
-  for (const p of FX.popups) {
-    const a = clamp(p.life / p.max * 1.6, 0, 1), sc = 1 + .25 * Math.max(0, (p.life - p.max + 140) / 140);
-    ctx.globalAlpha = a; ctx.font = `900 ${Math.round(46 * sc)}px Impact, "Arial Black", sans-serif`;
-    ctx.lineWidth = 7; ctx.strokeStyle = '#1a0508'; ctx.strokeText(p.text, p.x, p.y); ctx.fillStyle = p.c; ctx.fillText(p.text, p.x, p.y);
+  for (const p of G.popups) {
+    const a = clamp(p.life / p.max * 1.6, 0, 1);
+    ctx.save(); ctx.globalAlpha = a; title(p.text, p.x, p.y, p.size, p.c, '#1a0508'); ctx.restore();
   }
-  ctx.restore();
 }
-function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
-// real-time frame counter + hold indicator, drawn on top of the stage
-function drawHud(s, A, dur) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  const S = SPR[s.sheet], file = MANIFEST.find(m => m.key === s.sheet).file;
-  ctx.save();
-  ctx.fillStyle = 'rgba(8,6,12,.72)'; roundRect(20, 18, 340, 86, 10); ctx.fill();
-  ctx.strokeStyle = 'rgba(255,84,104,.5)'; ctx.lineWidth = 1; ctx.stroke();
-  ctx.fillStyle = '#9a90ad'; ctx.font = '700 13px "Segoe UI", sans-serif'; ctx.textBaseline = 'top';
-  ctx.fillText(A.label.toUpperCase(), 36, 30);
-  ctx.fillStyle = '#ffffff'; ctx.font = '900 34px Impact, "Arial Black", sans-serif';
-  const txt = A.music ? `FRAME ${s.f + 1} / ${s.n}` : `FRAME ${P.i + 1} / ${P.steps.length}`; ctx.fillText(txt, 36, 50);
-  ctx.fillStyle = '#9a90ad'; ctx.font = '12px ui-monospace, Consolas, monospace';
-  ctx.fillText(`${file} · #${s.f + 1}/${S ? S.frames.length : '?'}`, 36, 88);
-  // right side: fps + hold badge with a progress ring
-  const hold = A.music ? 0 : holdMs(s), base = baseMs(), inHold = hold > 0 && P.t > base;
-  ctx.fillStyle = 'rgba(8,6,12,.72)'; roundRect(W - 230, 18, 210, 58, 10); ctx.fill();
-  ctx.fillStyle = '#ffc85a'; ctx.font = '900 24px Impact, "Arial Black", sans-serif'; ctx.textAlign = 'left';
-  ctx.fillText(A.music ? `${MUS.fpsNow.toFixed(1)} FPS` : `${P.fps} FPS`, W - 214, 28);
-  ctx.fillStyle = '#9a90ad'; ctx.font = '12px "Segoe UI", sans-serif';
-  ctx.fillText(A.music ? (MUS.playing ? (s.section.mode === 'beat' ? `beat-synced${MUS.bpm ? ' · ' + MUS.bpm + ' BPM' : ''}`
-      : s.section.mode === 'script' && MUS.move ? `move ${MUS.move.i + 1}/${MUS.move.n} · ${MUS.move.side} hand` : 'song-timed sweep') : 'music paused')
-    : P.playing ? (P.loop ? 'playing · loop' : 'playing') : 'paused', W - 214, 56);
-  if (A.music) { drawMusicBar(s); ctx.restore(); return; }
-  if (s.tag) {
-    ctx.fillStyle = inHold ? '#ff5468' : '#c7bedb'; ctx.font = '700 12px "Segoe UI", sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(s.tag.toUpperCase(), W - 70, 56);
-  }
-  if (hold > 0) {
-    const cx = W - 46, cy = 47, prog = inHold ? (P.t - base) / hold : 0;
-    ctx.strokeStyle = 'rgba(255,84,104,.25)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(cx, cy, 16, 0, 7); ctx.stroke();
-    if (inHold) { ctx.strokeStyle = '#ff5468'; ctx.beginPath(); ctx.arc(cx, cy, 16, -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2); ctx.stroke(); }
-    ctx.fillStyle = inHold ? '#ff5468' : 'rgba(255,84,104,.5)'; ctx.font = '18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('♥', cx, cy + 1);
-  }
-  // step progress bar
-  ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fillRect(20, H - 14, W - 40, 4);
-  ctx.fillStyle = '#ff5468'; ctx.fillRect(20, H - 14, (W - 40) * ((P.i + clamp(P.t / dur, 0, 1)) / P.steps.length), 4);
-  if (RAW_MODE) {
-    ctx.fillStyle = 'rgba(255,179,71,.95)'; ctx.font = '700 13px "Segoe UI", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText('Opened from file:// — white keying and frame measuring need a local web server', W / 2, H - 40);
-  }
-  ctx.restore();
+// HUD: portraits, health bars, round-win pips, timer, special readiness
+const AVATAR = {};
+function avatar(id) {
+  if (AVATAR[id]) return AVATAR[id];
+  const S = SPR[CHARS[id].portrait]; if (!S) return null;
+  const F = S.frames[0], c = mk(84, 84), g = c.getContext('2d'), s = 84 / Math.min(F.w, F.h * .62);
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(S.strip, F.sX, F.sY, F.w, F.h, (84 - F.w * s) / 2, id === 'joe' ? -6 : -4, F.w * s, F.h * s);
+  return (AVATAR[id] = c);
 }
-// music overlay: "05.2s / 28.0s - Active: Victory 1 Crossover", section-marked progress bar, energy meter
-function drawMusicBar(s) {
-  const t = musicTime(), dur = MUS.dur || 1, secs = musicSections();
-  const bx = 380, bw = W - 380 - 250, by = 26;
-  ctx.fillStyle = 'rgba(8,6,12,.72)'; roundRect(bx, 18, bw, 58, 10); ctx.fill();
-  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#ffffff'; ctx.font = '700 17px "Segoe UI", sans-serif';
-  const label = MUS.ready ? `${t.toFixed(1).padStart(4, '0')}s / ${dur.toFixed(1)}s - Active: ${s.section.label}` : 'Press "Play Victory Music" to start the song';
-  ctx.fillText(label, bx + 14, by);
-  const px = bx + 14, pw = bw - 28, py = by + 30;
-  ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fillRect(px, py, pw, 8);
-  secs.forEach((S, i) => {
-    const x0 = px + pw * S.t0 / dur, x1 = px + pw * S.t1 / dur;
-    ctx.fillStyle = i === MUS.sec ? 'rgba(255,84,104,.35)' : 'rgba(255,255,255,.05)'; ctx.fillRect(x0, py, x1 - x0, 8);
-    ctx.fillStyle = 'rgba(255,255,255,.45)'; ctx.fillRect(Math.round(x0), py - 3, 1, 14);
-  });
-  ctx.fillStyle = '#ff5468'; ctx.fillRect(px, py, pw * clamp(t / dur, 0, 1), 8);
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(Math.round(px + pw * clamp(t / dur, 0, 1)) - 1, py - 4, 3, 16);
-  // energy meter under the stage progress line
-  ctx.fillStyle = 'rgba(255,255,255,.08)'; ctx.fillRect(20, H - 14, W - 40, 4);
-  ctx.fillStyle = '#ff5468'; ctx.fillRect(20, H - 14, (W - 40) * clamp(t / dur, 0, 1), 4);
-  ctx.fillStyle = 'rgba(255,200,90,.85)'; ctx.fillRect(20, H - 22, 160 * MUS.energy, 4);
-  ctx.fillStyle = '#9a90ad'; ctx.font = '11px "Segoe UI", sans-serif'; ctx.textBaseline = 'bottom'; ctx.fillText('ENERGY', 188, H - 17);
-}
-
-/* ---------- 9. dashboard ---------- */
-function setFps(v) { P.fps = clamp(Math.round(v), 1, 60); $('fps').value = P.fps; $('fpsOut').textContent = `${P.fps} FPS`; }
-function syncPlay() { $('btnPlay').innerHTML = P.playing ? '&#9208;' : '&#9654;'; $('btnPlay').title = P.playing ? 'Pause (Space)' : 'Play (Space)'; }
-function syncUI() {
-  $('animSelect').value = P.anim.id;
-  $('animHint').textContent = P.anim.hint || '';
-  $('whipCard').classList.toggle('disabled', !P.anim.opp);
-  $('btnLoop').classList.toggle('on', P.loop);
-  syncPlay(); syncWhipStats(); renderTimeline(); syncMusic();
-  document.querySelectorAll('.fighter').forEach(b => b.classList.toggle('on', b.dataset.id === (P.anim.fighter || 'rokaia') && !!P.anim.fighter));
-}
-function syncWhipStats() {
-  $('distOut').textContent = `${UI.dist} px`;
-  const F = whipPeak();
-  if (F && F.zone) {
-    const s = whipStretchFor(F), tip = whipTipX(F, s), reach = tip >= oppX() - OPP_BODY;
-    $('whipStretch').textContent = `${s.toFixed(2)}×`;
-    $('whipReach').textContent = reach ? 'in range' : 'too far';
-    $('whipReach').className = reach ? 'hit' : 'miss';
-  }
-  const r = $('whipResult');
-  r.textContent = UI.lastStrike ? UI.lastStrike.toUpperCase() : '—';
-  r.className = UI.lastStrike || '';
-}
-function renderTimeline() {
-  const el = $('timeline');
-  if (el.dataset.anim !== P.anim.id || el.children.length !== P.steps.length) {
-    el.dataset.anim = P.anim.id; el.innerHTML = '';
-    P.steps.forEach((s, i) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'chip' + (s.beats ? ' hold' : '') + (s.strike ? ' hit' : '');
-      const beats = s.beats ? ` ♥${s.beats > 1 ? '×' + s.beats : ''}` : '';
-      if (P.anim.music) { // song sections: click to jump there
-        b.className = 'chip section';
-        b.innerHTML = `<b>${s.t0}–${isFinite(s.t1) ? s.t1.toFixed(s.t1 % 1 ? 1 : 0) : 'end'}s</b><span class="tag">${s.tag} · ${s.sheet}</span>`;
-        b.title = `${MANIFEST.find(m => m.key === s.sheet).file}`;
-        b.onclick = () => musicSeek(s.t0);
-      } else {
-        b.innerHTML = `<b>${i + 1}</b><span class="tag">${(s.tag || s.sheet)}${beats}</span>`;
-        b.title = `${MANIFEST.find(m => m.key === s.sheet).file} · frame ${s.f + 1}`;
-        b.onclick = () => { P.playing = false; P.i = i; P.t = 0; enterStep(); syncPlay(); };
-      }
-      el.append(b);
-    });
-  }
-  [...el.children].forEach((c, i) => c.classList.toggle('now', i === P.i));
-  const now = el.children[P.i];
-  if (now) { const l = now.offsetLeft - el.offsetLeft, r = l + now.offsetWidth; if (l < el.scrollLeft || r > el.scrollLeft + el.clientWidth) el.scrollLeft = l - 40; }
-}
-let beatTimer = 0;
-function pulseBeat() {
-  const b = $('beat'); b.classList.add('pulse'); clearTimeout(beatTimer); beatTimer = setTimeout(() => b.classList.remove('pulse'), 160);
-}
-function buildSelect() {
-  const sel = $('animSelect'); sel.innerHTML = '';
-  const groups = {};
-  ANIMS.forEach(a => {
-    if (!groups[a.group]) { groups[a.group] = document.createElement('optgroup'); groups[a.group].label = a.group; sel.append(groups[a.group]); }
-    const o = document.createElement('option'), ok = a.needs.every(k => SPR[k]);
-    o.value = a.id; o.textContent = a.label + (ok ? '' : ' (missing art)'); o.disabled = !ok;
-    groups[a.group].append(o);
-  });
-}
-// fighter select panel: one portrait card per fighter; clicking opens that fighter's character-select view
-function buildFighters() {
-  const box = $('fighters'); box.innerHTML = '';
-  FIGHTERS.forEach(fi => {
-    const S = SPR[fi.sheet], b = document.createElement('button');
-    b.type = 'button'; b.className = 'fighter'; b.dataset.id = fi.id; b.disabled = !S;
-    const c = mk(120, 120), g = c.getContext('2d');
-    if (S) { // fill the square with the portrait's upper part (the face)
-      const F = S.frames[0], s = Math.max(120 / F.w, 120 / Math.min(F.h, F.w * 1.05));
-      g.imageSmoothingQuality = 'high'; g.drawImage(S.strip, F.sX, F.sY, F.w, F.h, (120 - F.w * s) / 2, 0, F.w * s, F.h * s);
+function drawHud() {
+  for (const f of [G.p, G.c]) {
+    const left = f.idx === 0, bx = left ? 128 : W - 128 - 440, by = 34;
+    const av = avatar(f.id), ax = left ? 24 : W - 24 - 88;
+    ctx.save();
+    ctx.fillStyle = '#0c0810'; roundRect(ax, 20, 88, 88, 10); ctx.fill();
+    if (av) { ctx.save(); roundRect(ax + 2, 22, 84, 84, 9); ctx.clip(); ctx.drawImage(av, ax + 2, 22); ctx.restore(); }
+    ctx.strokeStyle = f.C.color; ctx.lineWidth = 3; roundRect(ax, 20, 88, 88, 10); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; roundRect(bx - 4, by - 4, 448, 34, 8); ctx.fill();
+    const w = 440, hpW = w * f.hp / 100, shW = w * f.shown / 100;
+    ctx.fillStyle = '#5a0a14'; ctx.fillRect(bx, by, w, 26);
+    ctx.fillStyle = '#ffd25a'; ctx.fillRect(left ? bx : bx + w - shW, by, shW, 26);
+    const hg = ctx.createLinearGradient(0, by, 0, by + 26); hg.addColorStop(0, '#7dff9a'); hg.addColorStop(1, '#1f9a48');
+    ctx.fillStyle = f.hp > 30 ? hg : '#ff5468'; ctx.fillRect(left ? bx : bx + w - hpW, by, hpW, 26);
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.strokeRect(bx, by, w, 26);
+    title(f.C.name + (f.cpu ? ' · CPU' : ''), left ? bx : bx + w, by + 48, 24, '#fff', '#000', left ? 'left' : 'right');
+    for (let k = 0; k < ROUNDS_TO_WIN; k++) {
+      const px = left ? bx + w - 14 - k * 26 : bx + 14 + k * 26;
+      ctx.beginPath(); ctx.arc(px, by + 48, 9, 0, 7); ctx.fillStyle = f.wins > k ? '#ffc85a' : 'rgba(40,10,0,.85)'; ctx.fill();
+      ctx.strokeStyle = '#ffcf5a'; ctx.lineWidth = 2; ctx.stroke();
     }
-    b.append(c);
-    const n = document.createElement('span'); n.className = 'fighter-name'; n.textContent = fi.name;
-    const t = document.createElement('span'); t.className = 'fighter-tag'; t.textContent = S ? fi.tag : 'missing art';
-    b.append(n, t);
-    b.onclick = () => selectAnim(fi.anim);
-    box.append(b);
-  });
+    const ready = f.cool <= 0, sx = left ? bx : bx + w - 160;
+    ctx.fillStyle = ready ? (G.t % 40 < 20 ? 'rgba(211,38,58,.9)' : 'rgba(150,25,40,.9)') : 'rgba(60,60,60,.8)'; roundRect(sx, by + 66, 160, 22, 6); ctx.fill();
+    if (!ready) { ctx.fillStyle = 'rgba(255,200,90,.6)'; ctx.fillRect(sx, by + 84, 160 * (1 - f.cool / f.C.atk.special.cool), 4); }
+    ctx.fillStyle = ready ? '#fff' : '#aaa'; ctx.font = '700 13px "Segoe UI", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ready ? `SPECIAL READY${f.cpu ? '' : ' [L]'}` : 'SPECIAL CHARGING', sx + 80, by + 77);
+    ctx.restore();
+  }
+  ctx.save(); ctx.fillStyle = 'rgba(0,0,0,.6)'; roundRect(W / 2 - 46, 18, 92, 70, 10); ctx.fill(); ctx.restore();
+  title(String(G.timer).padStart(2, '0'), W / 2, 50, 46, G.timer <= 10 ? '#ff5468' : '#ffc85a', '#000');
+  title(`ROUND ${G.round}`, W / 2, 104, 18, '#ffb070', '#000');
 }
-function buildAssetList() {
-  const ul = $('assetList'); ul.innerHTML = '';
-  let found = 0;
-  MANIFEST.forEach(m => {
-    const st = ASSET_STATE[m.key], S = SPR[m.key], li = document.createElement('li');
-    if (st === 'ok') found++;
-    const note = st === 'ok' ? `${S.frames.length} frame${S.frames.length > 1 ? 's' : ''}` : m.key === 'whip2' ? 'missing → batch 1 reversed' : 'missing';
-    li.innerHTML = `<span title="${m.label}">${m.file}</span><span class="${st === 'ok' ? 'ok' : 'missing'}">${st === 'ok' ? '✓ ' : '⚠ '}${note}</span>`;
-    ul.append(li);
-  });
-  $('assetCount').textContent = `${found} / ${MANIFEST.length}`;
+function drawBanner() {
+  const b = G.banner; if (!b) return;
+  const k = b.t / b.len, a = k < .15 ? k / .15 : k > .8 ? (1 - k) / .2 : 1, sc = 1 + .4 * Math.max(0, 1 - b.t / 10);
+  ctx.save(); ctx.globalAlpha = clamp(a, 0, 1); ctx.translate(W / 2, H * .42); ctx.scale(sc, sc);
+  title(b.text, 0, 0, 120, b.red ? '#ff5468' : '#ffc85a', '#1a0004');
+  ctx.restore();
 }
-function wireControls() {
-  $('animSelect').onchange = e => selectAnim(e.target.value);
-  // in the synced routine the transport drives the song: play/pause it, ←/→ seek one second, restart = 0.0s
-  $('btnPlay').onclick = () => {
-    if (P.anim.music) return MUS.playing ? musicPause() : musicPlay();
-    P.playing = !P.playing; if (P.playing && !P.loop && P.i === P.steps.length - 1 && P.t >= stepMs(curStep())) { P.i = 0; P.t = 0; enterStep(); } syncPlay();
-  };
-  $('btnFwd').onclick = () => { if (P.anim.music) return musicSeek(musicTime() + 1); P.playing = false; advance(1); syncPlay(); };
-  $('btnBack').onclick = () => { if (P.anim.music) return musicSeek(musicTime() - 1); P.playing = false; advance(-1); syncPlay(); };
-  $('btnLoop').onclick = () => { P.loop = !P.loop; $('btnLoop').classList.toggle('on', P.loop); setLoopMusic(); };
-  $('btnRestart').onclick = () => { if (P.anim.music) { musicSeek(0); if (!MUS.playing) musicPlay(); return; } P.i = 0; P.t = 0; P.playing = true; OPP.hitT = -1; enterStep(); syncPlay(); };
-  $('btnMusic').onclick = () => {
-    if (P.anim.music && MUS.playing) return musicPause();
-    if (!P.anim.music) selectAnim('music');
-    musicPlay();
-  };
-  $('btnSound').onclick = () => setMuted(!MUS.muted);
-  $('fps').oninput = e => setFps(+e.target.value);
-  $('btnDefaultFps').onclick = () => setFps(P.anim.fps);
-  $('btnSlowMo').onclick = () => {
-    P.holds = true; $('holdsOn').checked = true;
-    P.beatMs = 600; $('beatMs').value = 600; syncBeat();
-    if (!P.anim.victory) selectAnim('v1full', true);
-    setFps(4);
-  };
-  $('beatMs').oninput = e => { P.beatMs = +e.target.value; syncBeat(); };
-  $('holdsOn').onchange = e => { P.holds = e.target.checked; };
-  $('dist').oninput = e => { UI.dist = +e.target.value; syncWhipStats(); };
-  $('showGuides').onchange = e => { UI.guides = e.target.checked; };
-  $('showOpp').onchange = e => { UI.showOpp = e.target.checked; };
-  addEventListener('keydown', e => {
-    if (e.target.tagName === 'SELECT' || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range')) return;
-    if (e.code === 'Space') { e.preventDefault(); $('btnPlay').click(); }
-    else if (e.code === 'ArrowRight') { e.preventDefault(); $('btnFwd').click(); }
-    else if (e.code === 'ArrowLeft') { e.preventDefault(); $('btnBack').click(); }
-    else if (e.code === 'KeyL') $('btnLoop').click();
-    else if (e.code === 'KeyR') $('btnRestart').click();
-    else if (/^Digit[1-9]$/.test(e.code)) { const opts = [...$('animSelect').options].filter(o => !o.disabled), o = opts[+e.code.slice(5) - 1]; if (o) selectAnim(o.value); }
-  });
+
+/* ---------- 14. menus (drawn on the canvas, mouse / touch / keyboard) ---------- */
+let BUTTONS = [];
+function button(label, x, y, w, h, action, focused) {
+  BUTTONS.push({ x, y, w, h, action });
+  ctx.save();
+  ctx.fillStyle = focused ? '#d3263a' : 'rgba(24,16,30,.85)'; roundRect(x, y, w, h, 12); ctx.fill();
+  ctx.strokeStyle = focused ? '#ffd0d6' : 'rgba(255,84,104,.55)'; ctx.lineWidth = focused ? 3 : 2; ctx.stroke();
+  if (focused) { ctx.shadowColor = 'rgba(255,84,104,.8)'; ctx.shadowBlur = 24; ctx.stroke(); }
+  ctx.restore();
+  title(label, x + w / 2, y + h / 2 + 2, Math.min(34, h * .5), '#fff', '#2a0008');
 }
-function syncMusic() {
-  const on = P.anim && P.anim.music && MUS.playing;
-  $('btnMusic').innerHTML = on ? '&#9208; Pause Victory Music' : '&#9654; Play Victory Music';
-  $('btnMusic').classList.toggle('playing', on);
-  $('btnSound').innerHTML = MUS.muted ? '&#128263; Sound off' : '&#128266; Sound on';
-  $('btnSound').classList.toggle('on', !MUS.muted);
-  if (MUS.ready) $('musicStatus').textContent = `${SONG_FILE} · ${MUS.srcDur.toFixed(1)}s stretched to ${MUS.dur.toFixed(1)}s (pitch kept) · ${P.loop ? 'loops' : 'plays once'}`;
-  if (P.anim && P.anim.music && MUS.ready && P.steps.some(s => !isFinite(s.t1))) { // song length known: finale ends at the real end
-    P.steps = P.anim.build(); $('timeline').dataset.anim = ''; renderTimeline();
+function menuButtons() {
+  if (G.scene === 'menu') return G.help ? [() => (G.help = false)] : [goSelect, () => (G.help = true), () => setSound(!SFX.on)];
+  if (G.scene === 'victory') return [() => startMatch(G.p.id), goSelect, goMenu];
+  if (G.scene === 'fight' && G.paused) return [() => (G.paused = false), goMenu];
+  return [];
+}
+function menuKey(code) {
+  if (G.scene === 'loading') return;
+  if (G.scene === 'fight' && !G.paused) { if (code === 'Escape' || code === 'KeyP') G.paused = true; return; }
+  if (G.scene === 'select') {
+    if (G.picked >= 0) return;
+    if (['ArrowLeft', 'KeyA', 'ArrowRight', 'KeyD'].includes(code)) { G.pick = 1 - G.pick; sfx.move(); }
+    else if (['Enter', 'Space', 'KeyJ'].includes(code)) pickFighter(G.pick);
+    else if (code === 'Escape') goMenu();
+    return;
+  }
+  const acts = menuButtons(); if (!acts.length) return;
+  if (['ArrowUp', 'KeyW', 'ArrowLeft', 'KeyA'].includes(code)) { G.focus = (G.focus + acts.length - 1) % acts.length; sfx.move(); }
+  else if (['ArrowDown', 'KeyS', 'ArrowRight', 'KeyD'].includes(code)) { G.focus = (G.focus + 1) % acts.length; sfx.move(); }
+  else if (['Enter', 'Space', 'KeyJ'].includes(code)) { sfx.pick(); acts[clamp(G.focus, 0, acts.length - 1)](); if (G.scene !== 'menu' || !G.help) G.focus = clamp(G.focus, 0, menuButtons().length - 1); }
+  else if (code === 'Escape') { if (G.scene === 'fight') G.paused = false; else if (G.help) G.help = false; else if (G.scene === 'victory') goMenu(); }
+}
+function pickFighter(i) { G.pick = i; G.picked = i; G.pickT = 0; sfx.pick(); }
+function toCanvas(e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+cv.addEventListener('pointerdown', e => {
+  sfxCtx();
+  const [x, y] = toCanvas(e);
+  if (G.scene === 'select' && G.picked < 0) { const i = SELECT_CARDS.findIndex(c => x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h); if (i >= 0) pickFighter(i); return; }
+  if (G.scene === 'fight' && !G.paused && x > W / 2 - 50 && x < W / 2 + 50 && y < 90) { G.paused = true; return; } // tap the timer to pause
+  const b = BUTTONS.findIndex(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+  if (b >= 0) { G.focus = b; sfx.pick(); BUTTONS[b].action(); }
+});
+cv.addEventListener('pointermove', e => {
+  const [x, y] = toCanvas(e);
+  if (G.scene === 'select' && G.picked < 0) { const i = SELECT_CARDS.findIndex(c => x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h); if (i >= 0 && i !== G.pick) { G.pick = i; sfx.move(); } }
+  const b = BUTTONS.findIndex(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+  if (b >= 0 && b !== G.focus) G.focus = b;
+});
+
+function drawMenu(now) {
+  ctx.drawImage(BG, 0, 0);
+  ctx.fillStyle = 'rgba(8,5,12,.45)'; ctx.fillRect(0, 0, W, H);
+  // both fighters flank the title
+  const L = SPR.ref1, R = SPR.joeSel;
+  if (L) { const F = L.frames[0]; ctx.save(); ctx.globalAlpha = .9; ctx.drawImage(L.strip, F.sX, F.sY, F.w, F.h, 40, H - F.h * 1.1, F.w * 1.1, F.h * 1.1); ctx.restore(); }
+  if (R) { const F = R.frames[0]; ctx.save(); ctx.globalAlpha = .55; const s = .95; ctx.drawImage(R.strip, F.sX, F.sY, F.w, F.h, W - F.w * s - 10, H - F.h * s, F.w * s, F.h * s); ctx.restore();
+    const fade = ctx.createLinearGradient(W - F.w * s - 10, 0, W - F.w * s + 140, 0); fade.addColorStop(0, 'rgba(18,13,28,1)'); fade.addColorStop(1, 'rgba(18,13,28,0)');
+    ctx.fillStyle = fade; ctx.fillRect(W - F.w * s - 12, H - F.h * s, 160, F.h * s); }
+  title('MK ARCADE', W / 2, 130, 104, '#ffc85a', '#3a0610');
+  title('ROKAIA  ·  JOE', W / 2, 205, 30, '#ffd0d6', '#1a0004');
+  BUTTONS = [];
+  if (G.help) {
+    ctx.save(); ctx.fillStyle = 'rgba(12,8,18,.92)'; roundRect(W / 2 - 330, 250, 660, 380, 16); ctx.fill(); ctx.strokeStyle = '#ff5468'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+    const rows = [['Move', 'A / D  or  ← / →'], ['Jump', 'W  or  ↑'], ['Crouch (ducks punches + specials)', 'S  or  ↓'], ['Punch', 'J'], ['Kick / ponytail snap (hits low)', 'K'], ['Special', 'L'], ['Block (hold)', 'I  or  Shift'], ['Pause', 'Esc  (or tap the timer)']];
+    ctx.save(); ctx.font = '600 20px "Segoe UI", sans-serif'; ctx.textBaseline = 'middle';
+    rows.forEach(([a, b], i) => { ctx.fillStyle = '#c7bedb'; ctx.textAlign = 'left'; ctx.fillText(a, W / 2 - 300, 290 + i * 34); ctx.fillStyle = '#ffc85a'; ctx.textAlign = 'right'; ctx.fillText(b, W / 2 + 300, 290 + i * 34); });
+    ctx.restore();
+    button('BACK', W / 2 - 110, 562, 220, 52, () => (G.help = false), true);
+    return;
+  }
+  const items = [['ARCADE MODE', goSelect], ['HOW TO PLAY', () => (G.help = true)], [`SOUND: ${SFX.on ? 'ON' : 'OFF'}`, () => setSound(!SFX.on)]];
+  items.forEach(([label, act], i) => button(label, W / 2 - 180, 290 + i * 86, 360, 66, act, G.focus === i));
+  ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.font = '15px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('↑ ↓ to choose · Enter to select · or click / tap', W / 2, H - 30); ctx.restore();
+}
+let SELECT_CARDS = [];
+function drawSelect(now) {
+  ctx.drawImage(BG, 0, 0);
+  ctx.fillStyle = 'rgba(8,5,12,.55)'; ctx.fillRect(0, 0, W, H);
+  title('CHOOSE YOUR FIGHTER', W / 2, 70, 58, '#ffc85a', '#3a0610');
+  SELECT_CARDS = [];
+  ROSTER.forEach((id, i) => {
+    const C = CHARS[id], S = SPR[C.portrait], cw = 440, ch = 500, x = W / 2 - 470 + i * 500, y = 120, on = G.pick === i;
+    SELECT_CARDS.push({ x, y, w: cw, h: ch });
+    const lift = on ? -8 : 0, flashing = G.picked === i && G.pickT < 40 && G.pickT % 8 < 4;
+    ctx.save();
+    if (on) { ctx.shadowColor = C.color; ctx.shadowBlur = 40; }
+    const bg = ctx.createLinearGradient(0, y, 0, y + ch); bg.addColorStop(0, '#2a1622'); bg.addColorStop(1, '#0c0810');
+    ctx.fillStyle = bg; roundRect(x, y + lift, cw, ch, 18); ctx.fill();
+    ctx.restore();
+    if (S) {
+      const F = S.frames[0], s = Math.min((cw - 30) / F.w, 380 / F.h), dw = F.w * s, dh = F.h * s;
+      ctx.save(); roundRect(x + 4, y + lift + 4, cw - 8, ch - 8, 15); ctx.clip();
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(S.strip, F.sX, F.sY, F.w, F.h, x + (cw - dw) / 2, y + lift + 12, dw, dh);
+      if (flashing) { ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(x, y, cw, ch); }
+      ctx.restore();
+    }
+    ctx.save(); ctx.strokeStyle = on ? C.color : 'rgba(255,255,255,.18)'; ctx.lineWidth = on ? 4 : 2; roundRect(x, y + lift, cw, ch, 18); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.fillStyle = 'rgba(8,5,12,.82)'; ctx.fillRect(x + 4, y + lift + 390, cw - 8, 106); ctx.restore();
+    title(C.name, x + cw / 2, y + lift + 420, 44, '#fff', '#2a0008');
+    ctx.save(); ctx.fillStyle = '#c7bedb'; ctx.font = '600 16px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(`${C.style} · ` + C.moves.map(m => `${m[0]} ${m[1]}`).join(' · '), x + cw / 2, y + lift + 466, cw - 30); ctx.restore();
+    if (on) { title(G.picked === i ? 'READY!' : 'P1', x + cw / 2, y + lift - 2, 30, '#fff', '#d3263a'); }
+  });
+  ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.font = '15px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('← → to choose · Enter / J to fight · Esc for the menu · or click / tap a fighter', W / 2, H - 40); ctx.restore();
+  title('VS CPU', W / 2, 370, 40, '#ffc85a', '#3a0610');
+}
+function drawFight(now) {
+  ctx.drawImage(BG, 0, 0);
+  const order = [G.p, G.c].sort((a, b) => (a.atk ? 1 : 0) - (b.atk ? 1 : 0)); // the attacker draws on top
+  for (const f of order) drawFighter(f, now);
+  drawProjectiles(); drawFx(); drawHud(); drawBanner();
+  BUTTONS = [];
+  if (G.paused) {
+    ctx.fillStyle = 'rgba(6,4,10,.7)'; ctx.fillRect(0, 0, W, H);
+    title('PAUSED', W / 2, 220, 90, '#ffc85a');
+    button('RESUME', W / 2 - 170, 300, 340, 64, () => (G.paused = false), G.focus === 0);
+    button('MAIN MENU', W / 2 - 170, 384, 340, 64, goMenu, G.focus === 1);
   }
 }
-let meterT = 0;
-function syncMusicMeter() {
-  const now = performance.now(); if (now - meterT < 120) return; meterT = now;
-  $('musicEnergy').style.width = `${Math.round(MUS.energy * 100)}%`;
-  $('musicBpm').textContent = MUS.bpm ? `${MUS.bpm} BPM` : '—';
-  $('musicFps').textContent = `${MUS.fpsNow.toFixed(1)} FPS`;
-  $('musicTime').textContent = MUS.ready ? `${musicTime().toFixed(1)}s / ${MUS.dur.toFixed(1)}s` : '—';
+function drawVictory(now) {
+  ctx.drawImage(BG, 0, 0);
+  const w = G.winner, l = w === G.p ? G.c : G.p;
+  // the loser lies on the floor; the winner celebrates centre stage
+  if (l.id === 'rokaia') { const S = SPR.ko, F = S.frames[2]; shadow(l.x, F.w * .45); drawFrame(S, F, l.x, GROUND, { flip: true }); }
+  else { const S = SPR.jCrouch, F = S.frames[0]; shadow(l.x, F.w * .45); drawFrame(S, F, l.x, GROUND, { flip: true, rot: -.16, alpha: .85 }); }
+  if (w.id === 'rokaia') {
+    const s = MUS.step;
+    if (s) { const S = SPR[s.sheet], F = S.frames[Math.min(s.f, S.frames.length - 1)]; shadow(w.x, F.w * .42); drawFrame(S, F, w.x, GROUND - (s.lift || 0)); }
+    drawMusicBar();
+  } else {
+    const pump = Math.floor(G.vt / 700) % 2, S = SPR[pump ? 'jPunch' : 'jIdle'], F = S.frames[0];
+    shadow(w.x, F.w * .42); drawFrame(S, F, w.x, GROUND - Math.abs(Math.sin(G.vt / 350)) * 6);
+  }
+  title(`${w.C.name} WINS!`, W / 2, 120, 92, w.C.color, '#1a0004');
+  BUTTONS = [];
+  ['REMATCH', 'CHARACTER SELECT', 'MAIN MENU'].forEach((label, i) => button(label, W / 2 - 540 + i * 370, H - 92, 340, 60, menuButtons()[i], G.focus === i));
 }
-function syncBeat() { $('beatOut').textContent = `${P.beatMs} ms`; $('beatLabel').textContent = `${P.beatMs} ms · ${Math.round(60000 / P.beatMs)} BPM`; }
+// Rokaia's routine overlay: "05.2s / 27.0s - Active: Victory 1 Crossover" over a progress bar
+function drawMusicBar() {
+  const t = musicTime(), s = MUS.step, bx = W / 2 - 330, by = 178;
+  ctx.save(); ctx.fillStyle = 'rgba(8,6,12,.72)'; roundRect(bx, by, 660, 54, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = '700 16px "Segoe UI", sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(MUS.ready ? `${t.toFixed(1).padStart(4, '0')}s / ${MUS.dur.toFixed(1)}s - Active: ${s ? s.section.label : ''}` : 'Loading her victory song…', bx + 14, by + 8);
+  const px = bx + 14, pw = 632, py = by + 36;
+  ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fillRect(px, py, pw, 8);
+  SONG_MAP.forEach(S => { ctx.fillStyle = 'rgba(255,255,255,.45)'; ctx.fillRect(Math.round(px + pw * S.t0 / MUS.dur), py - 3, 1, 14); });
+  ctx.fillStyle = '#ff5468'; ctx.fillRect(px, py, pw * clamp(t / MUS.dur, 0, 1), 8);
+  ctx.restore();
+}
+function drawLoading() {
+  ctx.drawImage(BG, 0, 0);
+  ctx.fillStyle = 'rgba(8,5,12,.6)'; ctx.fillRect(0, 0, W, H);
+  title('MK ARCADE', W / 2, H / 2 - 60, 90, '#ffc85a');
+  if (G.error) {
+    ctx.save(); ctx.fillStyle = '#ffb347'; ctx.font = '600 18px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(G.error, W / 2, H / 2 + 40, W - 120); ctx.restore(); return;
+  }
+  ctx.fillStyle = 'rgba(255,255,255,.12)'; roundRect(W / 2 - 200, H / 2 + 20, 400, 14, 7); ctx.fill();
+  ctx.fillStyle = '#ff5468'; roundRect(W / 2 - 200, H / 2 + 20, 400 * G.load, 14, 7); ctx.fill();
+  ctx.save(); ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.font = '15px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Preparing the fighters…', W / 2, H / 2 + 62); ctx.restore();
+}
 
-/* ---------- 10. boot ---------- */
-let last = performance.now();
+/* ---------- 15. touch controls (phones / tablets) ---------- */
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+function showTouch(on) { $('touch').classList.toggle('show', !!on); }
+document.querySelectorAll('#touch [data-k]').forEach(b => {
+  const k = b.dataset.k, tap = ['up', 'punch', 'kick', 'special'].includes(k);
+  const down = e => { e.preventDefault(); sfxCtx(); b.classList.add('on'); IN.touch[k] = true; if (tap) IN.pressed[k] = true; };
+  const up = e => { e.preventDefault(); b.classList.remove('on'); IN.touch[k] = false; };
+  b.addEventListener('pointerdown', down); b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('pointerleave', up);
+});
+
+/* ---------- 16. main loop ---------- */
+let last = performance.now(), acc = 0;
 function frame(now) {
+  requestAnimationFrame(frame);                              // first: one bad frame never stops the game
   const dt = Math.min(100, now - last); last = now;
-  update(dt); render(now);
-  requestAnimationFrame(frame);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (G.scene === 'fight' && !G.paused) {
+    acc += G.slow > 0 ? dt * .35 : dt;                         // K.O. slow motion
+    while (acc >= TICK) { acc -= TICK; G.t++; if (G.slow > 0) G.slow--; fightTick(); if (G.scene !== 'fight') break; }
+  } else { acc = 0; G.t++; }
+  if (G.scene === 'select' && G.picked >= 0 && ++G.pickT > 48) startMatch(ROSTER[G.picked]);
+  if (G.scene === 'victory') { G.vt += dt; if (G.winner.id === 'rokaia') musicUpdate(dt); }
+  updateFx(dt);
+  ctx.save();
+  if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake) * .6);
+  if (G.scene === 'loading') drawLoading();
+  else if (G.scene === 'menu') drawMenu(now);
+  else if (G.scene === 'select') drawSelect(now);
+  else if (G.scene === 'fight') drawFight(now);
+  else if (G.scene === 'victory') drawVictory(now);
+  ctx.restore();
 }
 (async function boot() {
-  ctx.imageSmoothingEnabled = false;
   BG = buildBackground();
-  ctx.drawImage(BG, 0, 0);
-  wireControls(); syncBeat();
-  try {
-    await loadAll((msg, p) => { $('loadingText').textContent = `${msg} (${Math.round(p * 100)}%)`; });
-  } catch (e) {
-    console.error(e); $('loadingText').textContent = 'Could not process the sprite sheets: ' + e.message; return;
-  }
-  buildAssetList(); buildSelect(); buildFighters();
-  const first = ANIMS.find(a => a.needs.every(k => SPR[k]));
-  if (!first) { $('loadingText').textContent = 'No Rokaia sprite sheets found next to the engine or in ../assets/Rokaia/.'; return; }
-  OPP_SPR = buildOpponent();
-  $('loading').classList.add('hidden');
-  selectAnim(SPR.whip1 ? 'whip' : first.id);
+  freeze(BG).then(b => { BG = b; });
   requestAnimationFrame(t => { last = t; frame(t); });
+  try {
+    const missing = await loadAll(p => { G.load = p; });
+    if (missing.length) { G.error = `Missing art: ${missing.join(', ')}`; return; }
+    if (RAW_MODE) { G.error = 'Open the game from a web server (or GitHub Pages): the sprites need it to remove their white backgrounds.'; return; }
+  } catch (e) { console.error(e); G.error = 'Could not prepare the sprites: ' + e.message; return; }
+  goMenu();
 })();
