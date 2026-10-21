@@ -2,30 +2,101 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MK Arcade · Rokaia vs Joe</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Moe · Joe · Romana · Lulu · Rokaia</title>
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 <link rel="stylesheet" href="Rokaia/styles.css">
 </head>
 <body>
-<main class="arcade">
-  <div class="screen">
-    <canvas id="stage" width="1280" height="720" aria-label="MK Arcade game"></canvas>
-    <div class="touch" id="touch" aria-hidden="true">
-      <div class="pad">
-        <button data-k="up">&#9650;</button>
-        <button data-k="left">&#9664;</button>
-        <button data-k="down">&#9660;</button>
-        <button data-k="right">&#9654;</button>
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <button id="btnExit" class="hidden" title="Exit to menu (Esc)">✕ EXIT</button>
+
+  <div id="start" class="screen">
+    <div id="menuBtns" class="menu-row">
+      <button id="btnStart" class="btn" disabled>Loading…</button>
+      <button id="btnHost" class="btn alt" disabled>Host Online Game</button>
+    </div>
+    <div id="netPanel" class="hidden">
+      <div id="netStatus">Creating room…</div>
+      <div class="linkRow hidden" id="linkRow">
+        <input id="netLink" readonly>
+        <button id="btnCopy" class="small-btn">Copy</button>
       </div>
-      <div class="acts">
-        <button data-k="punch">PUNCH</button>
-        <button data-k="kick">KICK</button>
-        <button data-k="block">BLOCK</button>
-        <button data-k="special">SPECIAL</button>
+      <button id="btnNetCancel" class="small-btn grey">Cancel</button>
+    </div>
+    <div class="controls">
+      <div><b>PLAYER 1 (LEFT)</b>
+        <kbd>W</kbd> Jump &nbsp; <kbd>S</kbd> Crouch &nbsp; <kbd>A</kbd>/<kbd>D</kbd> Move<br>
+        <kbd>L</kbd> Punch &nbsp; <kbd>K</kbd> Kick &nbsp; <kbd>J</kbd> Block (hold)<br>
+        <kbd>F</kbd> Special (once per round)</div>
+      <div><b>PLAYER 2 (RIGHT)</b>
+        <kbd>↑</kbd> Jump &nbsp; <kbd>↓</kbd> Crouch &nbsp; <kbd>←</kbd>/<kbd>→</kbd> Move<br>
+        <kbd>N</kbd>/<kbd>Num1</kbd> Punch &nbsp; <kbd>M</kbd>/<kbd>Num2</kbd> Kick &nbsp; <kbd>B</kbd>/<kbd>Num0</kbd> Block (hold)<br>
+        <kbd>V</kbd>/<kbd>Num3</kbd> Special (once per round)</div>
+    </div>
+    <div class="tip"><b>Punch + Kick</b> together = overhead jump attack &nbsp;•&nbsp; <b>Jump + Punch / Kick</b> = air attack toward the direction held<br>
+      Kicks deal 2× punch damage &nbsp;•&nbsp; <b>Crouch</b> ducks punches &amp; specials &nbsp;•&nbsp; <b>Jump</b> clears kicks &amp; specials</div>
+  </div>
+
+  <!-- live VS match-up banner (menu + character select): P1 avatar & name | VS | P2 name & avatar -->
+  <div id="vsBanner" class="hidden">
+    <div class="vsb-side" data-p="0"><canvas class="vsb-ava" width="160" height="160"></canvas><div class="vsb-bar"><span class="vsb-tag">P1</span><span class="vsb-name">MOE</span></div></div>
+    <div class="vsb-vs">VS</div>
+    <div class="vsb-side" data-p="1"><div class="vsb-bar"><span class="vsb-name">ROMANA</span><span class="vsb-tag">P2</span></div><canvas class="vsb-ava" width="160" height="160"></canvas></div>
+  </div>
+
+  <div id="select" class="screen hidden">
+    <div class="sel-title">CHOOSE YOUR FIGHTER</div>
+    <div class="sel-row">
+      <div class="sel-side" id="selP1" data-p="0">
+        <div class="sel-head"><span class="sel-badge">P1</span><span class="sel-who">PLAYER 1</span></div>
+        <canvas class="sel-big" width="320" height="380"></canvas>
+        <div class="sel-name"></div><div class="sel-tagline"></div>
+        <div class="sel-cards"></div>
+        <div class="sel-help"></div>
+      </div>
+      <div class="sel-vs">VS</div>
+      <div class="sel-side" id="selP2" data-p="1">
+        <div class="sel-head"><span class="sel-badge">P2</span><span class="sel-who">PLAYER 2</span></div>
+        <canvas class="sel-big" width="320" height="380"></canvas>
+        <div class="sel-name"></div><div class="sel-tagline"></div>
+        <div class="sel-cards"></div>
+        <div class="sel-help"></div>
+      </div>
+    </div>
+    <div class="sel-foot"><button id="btnSelBack" class="small-btn grey">◀ Back</button><span id="selStatus"></span></div>
+  </div>
+
+  <div id="over" class="screen hidden">
+    <canvas id="goStage" width="1280" height="720"></canvas>
+    <div class="go-top"><div class="go-title">GAME OVER</div></div>
+    <div class="go-bottom">
+      <div id="goWinner"></div>
+      <div id="goScore"></div>
+      <div class="row">
+        <button id="btnRestart" class="btn">Restart Match</button>
+        <button id="btnMenu" class="btn alt">Main Menu</button>
       </div>
     </div>
   </div>
-</main>
+
+  <button id="mute" title="Toggle sound">🔊 Sound</button>
+</div>
+
+<div id="touch">
+  <div class="tb arrow" id="tUp" data-act="jump" title="Jump">▲</div>
+  <div class="tb arrow" id="tLeft" data-act="left">◀</div>
+  <div class="tb arrow" id="tRight" data-act="right">▶</div>
+  <div class="tb arrow" id="tDown" data-act="crouch" title="Duck">▼</div>
+  <div class="tb" id="tPunch" data-act="punch">PUNCH</div>
+  <div class="tb" id="tKick" data-act="kick">KICK</div>
+  <div class="tb" id="tBlock" data-act="block">BLOCK</div>
+  <div class="tb" id="tSpecial" data-act="special">MOE<br>SPECIAL</div>
+  <div id="tWho">Touch: P1 MOE ⇄</div>
+</div>
+<div id="rotateHint">↻ Rotate your phone to landscape for the best view</div>
+
 <script src="Rokaia/engine.js"></script>
 </body>
 </html>
