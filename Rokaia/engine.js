@@ -120,9 +120,24 @@ function warmShade(h, k) { const c = rgbOf(h); return `rgb(${Math.min(255, c[0] 
 /* =====================================================================
    AUDIO (synthesized, no files needed)
    ===================================================================== */
-let AC = null, noiseBuf = null, soundOn = true;
+let AC = null, noiseBuf = null, soundOn = true, acPrimed = false;
+// ONE shared AudioContext for everything (SFX, ring bell, combat music, Rokaia's song) — iOS allows only a few per
+// page. Browsers start it 'suspended' until a user gesture, and iOS 'interrupts' it after a call / backgrounding,
+// so every gesture (and coming back to the tab) resumes it. If audio isn't available at all, AC stays null and
+// every sound call is a silent no-op: the game logic never depends on audio.
 function initAudio() {
-  try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch (e) { AC = null; }
+  try {
+    if (!AC) {
+      const Ctx = window.AudioContext || window.webkitAudioContext; if (!Ctx) return;
+      AC = new Ctx();
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {} // iPhone: play like a game, not muted by the silent switch
+    }
+    if (AC.state !== 'running') { const p = AC.resume(); if (p && p.catch) p.catch(() => {}); }
+    if (!acPrimed) { // older iOS: a (silent) sound started inside the gesture is what actually unlocks the context
+      acPrimed = true;
+      const s = AC.createBufferSource(); s.buffer = AC.createBuffer(1, 1, 22050); s.connect(AC.destination); s.start(0);
+    }
+  } catch (e) { console.warn('Web Audio unavailable:', e); }
 }
 /* ---------- mix: SFX bus (1.0) + combat-music bus (0.25 while fighting) ----------
    Every synthesized sound goes through the SFX bus and is tracked, so the final K.O. can cut it dead; the combat
@@ -235,7 +250,7 @@ const sfx = {
   ko:     () => { tone(220, 1.2, 'sawtooth', .2, 55); noise(1, .4, 600, 'lowpass', 80); },
   win:    () => [523, 659, 784, 1046].forEach((f, i) => tone(f, .28, 'triangle', .16, null, i * .13))
 };
-for (const k of Object.keys(sfx)) { const fn = sfx[k]; sfx[k] = () => { fn(); emit('s', [k]); }; }
+for (const k of Object.keys(sfx)) { const fn = sfx[k]; sfx[k] = () => { try { fn(); } catch (e) {} emit('s', [k]); }; } // a failing sound never breaks the game
 
 /* ---------- music: victory.mp3 (pre-loaded) ---------- */
 const MUSIC = { victory: null, ready: false, bgm: null /* hook for a future match track */ };
@@ -248,17 +263,27 @@ function preloadMusic() {
   a.load();
   MUSIC.victory = a;
 }
-// mobile browsers only allow audio started from a tap/click: "unlock" the element on the first gesture
-let musicUnlocked = false;
+// mobile browsers only allow audio started from a tap/click: "unlock" the element on a gesture — retried on every
+// gesture until the browser accepts it (iOS only counts touchend / click, not touchstart)
+let musicUnlocked = false, musicUnlocking = false;
 function unlockMusic() {
-  if (musicUnlocked || !MUSIC.victory) return;
-  musicUnlocked = true;
-  const a = MUSIC.victory; a.muted = true;
-  const p = a.play();
-  const done = () => { if (G.phase !== 'victory') { a.pause(); try { a.currentTime = 0; } catch (e) {} } a.muted = !soundOn; };
-  p && p.then ? p.then(done, done) : done();
+  if (musicUnlocked || musicUnlocking || !MUSIC.victory) return;
+  const a = MUSIC.victory; a.muted = true; musicUnlocking = true;
+  const settle = ok => {
+    musicUnlocking = false; if (ok) musicUnlocked = true;
+    if (G.phase !== 'victory' && G.phase !== 'gameover') { a.pause(); try { a.currentTime = 0; } catch (e) {} }
+    a.muted = !soundOn;
+  };
+  let p; try { p = a.play(); } catch (e) { settle(false); return; }
+  p && p.then ? p.then(() => settle(true), () => settle(false)) : settle(true);
 }
-['pointerdown', 'keydown', 'touchstart'].forEach(t => addEventListener(t, unlockMusic, { capture: true, passive: true }));
+// the global unlock: every kind of first interaction (keyboard, mouse, touch — start AND end for iOS) resumes the
+// shared AudioContext, unlocks the victory song element and starts loading Rokaia's song
+function unlockAudio() { initAudio(); unlockMusic(); if (typeof rkLoad === 'function' && SPRITES.rokaia) rkLoad(); }
+['pointerdown', 'pointerup', 'mousedown', 'click', 'keydown', 'touchstart', 'touchend'].forEach(t => addEventListener(t, unlockAudio, { capture: true, passive: true }));
+// back from another tab / app, a phone call or the lock screen: pick the audio up again
+addEventListener('visibilitychange', () => { if (!document.hidden && AC && AC.state !== 'running' && acPrimed) { const p = AC.resume(); if (p && p.catch) p.catch(() => {}); } });
+addEventListener('pageshow', () => { if (AC && AC.state !== 'running' && acPrimed) { const p = AC.resume(); if (p && p.catch) p.catch(() => {}); } });
 function stopMatchMusic() { if (MUSIC.bgm) { MUSIC.bgm.pause(); } }
 // the match winner's dance song: ROKAIA has her own (27s loop, victory rokaia.mp3), everyone else victory.mp3
 const winnerDances = () => { const w = typeof fighters !== 'undefined' && fighters[G.winnerIdx]; return !!(w && w.char && w.char.dance); };
@@ -855,6 +880,8 @@ function rokaiaFrame(st, f) {
    song time straight to frames, the 4–8s block is a fixed six-move script that speeds up, and the beat sections step
    on the song's tempo, landing on the drum hits the analyser detects. */
 const RK_SONG = 'assets/Rokaia/victory rokaia.mp3', RK_LOOP = 27.0;
+// preloaded at startup (no gesture needed to download); decoding waits for the shared AudioContext
+const RK_BYTES = fetch(encodeURI(RK_SONG)).then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null);
 // move1_crossover.png poses by the side of the screen the extended arm reaches to (right = screen-right);
 // each scripted move gathers through a crossed-arms frame, then lands on the extended pose
 const CROSS_RL = { right: [2, 4], left: [0, 6], cross: [7, 1, 3, 5, 7, 1] };
@@ -890,13 +917,15 @@ function rkLoad() {
   if (RK.loading) return RK.loading;
   RK.loading = (async () => {
     try {
-      RK.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      initAudio(); if (!AC) return false;                       // the game's one shared AudioContext
+      RK.ctx = AC;
       RK.an = RK.ctx.createAnalyser(); RK.an.fftSize = 1024; RK.an.smoothingTimeConstant = .6;
       RK.gain = RK.ctx.createGain(); RK.gain.gain.value = soundOn ? 1 : 0;
       RK.an.connect(RK.gain); RK.gain.connect(RK.ctx.destination);
       RK.freq = new Uint8Array(RK.an.frequencyBinCount); RK.wave = new Uint8Array(RK.an.fftSize);
-      const r = await fetch(encodeURI(RK_SONG)); if (!r.ok) return false;
-      const raw = await RK.ctx.decodeAudioData(await r.arrayBuffer());
+      const bytes = await RK_BYTES; if (!bytes) return false;    // pre-fetched at startup
+      // promise + callback form: older Safari only supports the callbacks
+      const raw = await new Promise((res, rej) => { const p = RK.ctx.decodeAudioData(bytes.slice(0), res, rej); if (p && p.then) p.then(res, rej); });
       RK.buf = await rkStretch(raw, Math.round(RK_LOOP * raw.sampleRate));
       RK.dur = RK.buf.duration; RK.ready = true;
       return true;
@@ -904,7 +933,6 @@ function rkLoad() {
   })();
   return RK.loading;
 }
-['pointerdown', 'keydown', 'touchstart'].forEach(t => addEventListener(t, () => { if (SPRITES.rokaia) rkLoad(); }, { capture: true, passive: true, once: true }));
 // Pitch-preserving time-stretch (WSOLA): Hann-windowed grains of the song are laid out on the longer timeline; each is
 // taken from the spot near its nominal position that best continues the previous grain (cross-correlation)
 async function rkStretch(buf, outLen) {
@@ -940,7 +968,7 @@ const rkTime = () => RK.playing ? (RK.ctx.currentTime - RK.startAt) % RK.dur : R
 async function rkPlay(from = 0) {
   rkStop(); RK.want = true; RK.t = from; RK.sec = -1; RK.last = from;
   if (!(await rkLoad()) || !RK.want) return;               // no song: the routine still runs on its own clock (rkUpdate)
-  if (RK.ctx.state === 'suspended') { try { await RK.ctx.resume(); } catch (e) {} }
+  if (RK.ctx.state !== 'running') { try { await RK.ctx.resume(); } catch (e) {} } // 'suspended' or iOS 'interrupted'
   if (RK.ctx.state !== 'running' || !RK.want) return;      // audio not allowed yet: keep dancing on the silent clock
   RK.gain.gain.value = soundOn ? 1 : 0;
   const src = RK.ctx.createBufferSource();
@@ -2565,8 +2593,8 @@ function drawNetBanner() {
   }
   ctx.restore();
 }
-// browsers only allow sound after a user gesture — a guest who joined by link may never click a button
-['pointerdown', 'keydown', 'touchstart'].forEach(t => addEventListener(t, () => initAudio(), { capture: true, passive: true }));
+// (browsers only allow sound after a user gesture — the global unlock in AUDIO handles it, also for a guest who
+// joined by link and never clicked a button)
 
 // lingering smoke & dust from the ground slam, banked around the winner's legs (covers art that is cropped at the
 // thighs). Local to that fighter (±~210px), so it never reaches the opponent standing FRAME_GAP away.
@@ -3237,12 +3265,12 @@ const TURN_SERVERS = [
     credential: 'ee6dNDXQ+qc3S7vP'
   }
 ];
+// public STUN: Google first, plus Cloudflare and Twilio for networks that block Google's servers
 const GOOGLE_STUN = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' }
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
+  { urls: ['stun:stun3.l.google.com:19302', 'stun:stun4.l.google.com:19302'] },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:global.stun.twilio.com:3478' }
 ];
 let iceCache = null;
 async function getIceServers() {
@@ -3258,7 +3286,8 @@ async function getIceServers() {
     } catch (e) { console.warn('Metered TURN credentials request failed:', e); }
     clearTimeout(timer);
   }
-  if (!turn.length) turn = TURN_SERVERS.filter(s => s && s.urls && s.username && !/^YOUR_/.test(s.username));
+  // the fixed credential always rides along as a second relay, in case the fetched logins expire or are blocked
+  turn = turn.concat(TURN_SERVERS.filter(s => s && s.urls && s.username && !/^YOUR_/.test(s.username)));
   return (iceCache = { stun: GOOGLE_STUN, turn });
 }
 // relayOnly forces every packet through TURN — used as the automatic fallback when a direct path times out
@@ -3282,19 +3311,24 @@ function linkWarning() {
   return '';
 }
 
-async function hostOnline(attempt = 0) {
+// keepId: retrying after the signalling server dropped us — same room id, so the link already sent still works
+const HOST_RETRIES = 10, HOST_RETRY_MS = 3000;
+async function hostOnline(attempt = 0, keepId = null) {
   if (!window.Peer) { showNetPanel(true); netStatus('Online play needs an internet connection (PeerJS could not load).'); return; }
-  showNetPanel(true); $('linkRow').classList.add('hidden'); netStatus('Creating room…');
+  showNetPanel(true);
+  if (!keepId) { $('linkRow').classList.add('hidden'); netStatus('Creating room…'); }
   const token = NET.token = Symbol('host');
   const ice = await getIceServers();
   if (NET.token !== token) return; // cancelled while fetching credentials
-  const id = 'moevsjoe-' + Math.random().toString(36).slice(2, 8);
+  const id = keepId || 'moevsjoe-' + Math.random().toString(36).slice(2, 8);
   const peer = NET.peer = new Peer(id, peerOptions(ice));
   peer.on('open', pid => {
     if (NET.peer !== peer) return;
+    const changed = $('netLink').value && $('netLink').value !== shareLink(pid) && attempt > 0;
     $('netLink').value = shareLink(pid); $('linkRow').classList.remove('hidden');
     const warn = linkWarning();
-    netStatus('Waiting for opponent… Send this link to Player 2.' + (warn ? ' ' + warn : '') + (ice.turn.length ? '' : NO_TURN_NOTE));
+    netStatus((changed ? 'Reconnected with a NEW room — send this new link to Player 2. ' : keepId ? 'Reconnected! ' : '')
+      + 'Waiting for opponent… Send this link to Player 2.' + (warn ? ' ' + warn : '') + (ice.turn.length ? '' : NO_TURN_NOTE));
   });
   peer.on('connection', conn => {
     if (NET.peer !== peer) return;
@@ -3316,7 +3350,7 @@ async function hostOnline(attempt = 0) {
         return;
       }
       NET.role = 'host'; NET.me = 0; held[1] = {}; NET.lastRx = performance.now();
-      netStatus('Opponent joined! Starting match…');
+      netStatus('Connected! Opponent joined — starting…');
       // start straight away; the guest leaves its waiting screen on the first snapshot
       setTimeout(() => { if (NET.conn !== conn) return; initAudio(); showNetPanel(false); openSelect('online'); }, 400); // pick fighters first
     };
@@ -3329,10 +3363,21 @@ async function hostOnline(attempt = 0) {
   peer.on('disconnected', () => { if (NET.peer === peer && !peer.destroyed) try { peer.reconnect(); } catch (e) {} });
   peer.on('error', e => {
     if (NET.peer !== peer) return;
-    if (e.type === 'unavailable-id' && attempt < 3) { try { peer.destroy(); } catch (x) {} hostOnline(attempt + 1); return; }
-    netStatus('Connection error: ' + (e.type || e.message));
+    // the room id is taken (or our old registration hasn't expired yet): fall back to a brand-new room
+    if (e.type === 'unavailable-id' && attempt < HOST_RETRIES) { try { peer.destroy(); } catch (x) {} hostOnline(attempt + 1); return; }
+    // lost the signalling server / network while waiting for Player 2: retry the SAME room automatically
+    const transient = ['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected'].includes(e.type);
+    if (transient && NET.role !== 'host' && attempt < HOST_RETRIES) {
+      netStatus(`Connection to the game server dropped — reconnecting… (try ${attempt + 1} of ${HOST_RETRIES})`);
+      NET.peer = null; try { peer.destroy(); } catch (x) {}
+      const tok = NET.token; NET.retryTimer = setTimeout(() => { if (NET.token === tok) hostOnline(attempt + 1, id); }, HOST_RETRY_MS);
+      return;
+    }
+    netStatus('Connection error: ' + (e.type || e.message) + (transient ? ' — check your internet connection, then press Cancel and Host again.' : ''));
   });
 }
+// back online after a Wi-Fi / cellular blip: re-attach to the signalling server straight away
+addEventListener('online', () => { const p = NET.peer; if (p && p.disconnected && !p.destroyed) try { p.reconnect(); } catch (e) {} });
 
 /* Joining: try a direct P2P path first (STUN), then switch to relay-only (every packet through the Metered TURN
    relay — works behind any NAT / firewall / cellular CGNAT). Keep retrying through the relay — including
@@ -3528,7 +3573,7 @@ function applySnapshot(m) {
   });
   projectiles = m.p.map(a => ({ type: a[0], owner: fighters[a[1]], x: a[2], y: a[3], vx: a[4], r: a[5], t: a[6] }));
   for (const [n, args] of m.e) {
-    if (n === 's') sfx[args[0]](); else if (n === 'b') burst(...args); else if (n === 'd') dust(...args);
+    if (n === 's') { if (sfx[args[0]]) sfx[args[0]](); } else if (n === 'b') burst(...args); else if (n === 'd') dust(...args);
     else if (n === 'p') popup(...args); else if (n === 'k') shake(...args); else if (n === 'r') debris(...args);
     else if (n === 'sb') starburst(...args);
   }
