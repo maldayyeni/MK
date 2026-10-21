@@ -795,7 +795,9 @@ function luluFrame(st, f) {
     case 'special': return ['shuriken', [0, 0, 1, 2][st.i]];                 // the shuriken leaves on the launch frame
     case 'stun': return ['hit', [0, 1, 1, 2][st.i]];
     case 'hitAir': return ['ko', 0];                                         // collapse / falling
-    case 'down': return f.knock === 'rise' ? ['crouch', 0] : ['ko', f.ko ? 2 : 1]; // on the ground; gets up through the crouch
+    // knocked down: flat on the floor for the whole down time, then up through the crouch sheet in order —
+    // low kneel, mid squat, rising — and only then back to her fighting stance
+    case 'down': return f.knock === 'rise' ? ['crouch', f.knockT > 14 ? 2 : f.knockT > 7 ? 1 : 0] : ['ko', f.ko ? 2 : 1];
     case 'victory': return ['victory', st.i < 1 ? 0 : [1, 2, 3, 2][Math.floor(G.frame / 14) % 4]]; // dance loop
     case 'defeat': return G.phase === 'roundEnd' ? ['hit', 2] : ['ko', 2];
     default: return shurikenReturning(f) ? ['shuriken', 3] : ['idle', 0];  // catches the returning shuriken
@@ -2047,7 +2049,9 @@ function specialHit(p, d) {
 }
 
 function knockdown(a, d, isKO) {
-  d.knock = 'air'; d.airT = 0; d.onGround = false; d.vy = -11; d.vx = a.facing * 8; d.blocking = false; d.action = null;
+  // the knockdown replaces any hit-stun from the same strike: the stun can't count down on the floor, so leaving
+  // it set played a second hurt animation after getting up
+  d.knock = 'air'; d.airT = 0; d.onGround = false; d.vy = -11; d.vx = a.facing * 8; d.blocking = false; d.action = null; d.stun = 0; d.react = null;
   if (isKO) { d.ko = true; endRound(a); }
 }
 
