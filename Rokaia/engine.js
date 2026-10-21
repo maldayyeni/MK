@@ -158,7 +158,7 @@ function noise(d, v = .3, freq = 1000, ftype = 'lowpass', f2 = null, delay = 0) 
   g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
   s.connect(fl).connect(g).connect(sfxBus()); s.start(t); s.stop(t + d + .03); track(s);
 }
-// the ring bell before each round: three metallic strikes (inharmonic partials, long ring) at FULL volume
+// the ring bell at "FIGHT!": three metallic strikes (inharmonic partials, long ring) at FULL volume
 function ringBell() {
   if (!AC || !soundOn || matchDecided()) return;
   const partials = [[1, .5], [2.76, .28], [5.4, .14], [8.93, .08]], f0 = 640;
@@ -862,14 +862,22 @@ const RK_MAP = [ // [start, end) in seconds
   { t0: 4,  t1: 8,  anim: 'dCross', mode: 'script', label: 'Victory 1 Crossover (R/L, building)',
     moves: ['right', 'left', 'right', 'left', 'right', 'left'], pace: [1.45, 1.25, 1.05, .9, .75, .6], gather: .3 },
   // tempo-locked: crossed, RIGHT, crossed, LEFT, … so every beat lands on the other side (opens crossed: move 6 was left)
-  { t0: 8,  t1: 14, anim: 'dCross', mode: 'beat', label: 'Victory 1 Crossover (on the beat)',
+  { t0: 8,  t1: 10, anim: 'dCross', mode: 'beat', label: 'Victory 1 Crossover (on the beat)',
+    order: [1, CROSS_RL.right[0], 3, CROSS_RL.left[1], 5, CROSS_RL.right[1], 7, CROSS_RL.left[0]] },
+  // 10–14s: the same alternation, slightly slower (feel: dCrossSlow) so each pose settles onto a drum hit before
+  // the 14s hands-on-waist groove; `cont` carries the R/L order on from 8–10s instead of restarting it
+  { t0: 10, t1: 14, anim: 'dCross', mode: 'beat', label: 'Victory 1 Crossover (settling into the groove)', feel: 'dCrossSlow', cont: true,
     order: [1, CROSS_RL.right[0], 3, CROSS_RL.left[1], 5, CROSS_RL.right[1], 7, CROSS_RL.left[0]] },
   { t0: 14, t1: 24, anim: 'dWaist', mode: 'beat', label: 'Victory 1 Hands on Waist' },
   { t0: 24, t1: RK_LOOP, anim: 'victory', mode: 'sweep', label: 'Victory 3 Arms Sweep (finale)' }
 ];
 const RK_SWEEP = [1, 1.2, .8, .8, .5];   // full extension in the last ~12%: it peaks right at 4.0s / at 27.0s
 const RK_BPM = 100;                      // felt tempo of the stretched song; used until the analyser has a reading
-const RK_FEEL = { dCross: { perBeat: 2, maxFps: 4.5, lock: .8 }, dWaist: { perBeat: 1, maxFps: 2.2, lock: .85 } };
+const RK_FEEL = {
+  dCross: { perBeat: 2, maxFps: 4.5, lock: .8 },        // 8–10s: arm out on the beat, crossover on the off-beat
+  dCrossSlow: { perBeat: 1.5, maxFps: 3, lock: .85 },   // 10–14s: ~25% slower, each step waits for a drum hit
+  dWaist: { perBeat: 1, maxFps: 2.2, lock: .85 }        // 14–24s: one sway per main drum/bass hit
+};
 const RK = {
   ctx: null, buf: null, src: null, an: null, gain: null, freq: null, wave: null, prev: null, loading: null, ready: false,
   playing: false, startAt: 0, dur: RK_LOOP, last: 0, sec: -1, ord: 0, lastStep: -1, frame: 0, step: null, beat: false,
@@ -974,7 +982,10 @@ function rkUpdate(dt) {
   const beat = rkAnalyse(t);
   let si = RK_MAP.findIndex(s => t >= s.t0 && t < s.t1); if (si < 0) si = RK_MAP.length - 1;
   const S = RK_MAP[si], A = spr[S.anim], n = A ? A.frames.length : 1;
-  if (si !== RK.sec) { RK.sec = si; RK.ord = 0; RK.frame = S.order ? S.order[0] : 0; RK.lastStep = t; }
+  if (si !== RK.sec) {
+    const carry = S.cont && RK.sec === si - 1;                // continue the previous section's R/L order
+    RK.sec = si; if (!carry) { RK.ord = 0; RK.frame = S.order ? S.order[0] : 0; } RK.lastStep = t;
+  }
   RK.beat = false;
   if (S.mode === 'sweep') {
     const w = RK_SWEEP.slice(0, n), tot = w.reduce((a, b) => a + b, 0);
@@ -990,7 +1001,7 @@ function rkUpdate(dt) {
     if (f === pose && RK.frame !== pose) { RK.bounce = 1; RK.beat = true; }
     RK.frame = f;
   } else {
-    const B = RK_FEEL[S.anim], T = 60 / (RK.bpm || RK_BPM);
+    const B = RK_FEEL[S.feel || S.anim], T = 60 / (RK.bpm || RK_BPM);
     const iv = Math.max(T / B.perBeat * (1.12 - .24 * RK.energy), 1 / B.maxFps), since = t - RK.lastStep;
     if (RK.lastStep < 0 || since < 0) RK.lastStep = t;
     else if ((beat && since >= iv * B.lock) || since >= iv * 1.5) {
@@ -1719,7 +1730,7 @@ function startRound() {
   if (G.round === 1 && SKY_DROP_INTRO) { // optional SKY-DROP intro — both fall from high above the screen onto their marks
     G.phase = 'intro';
     fighters.forEach(f => { f.y = GROUND - INTRO_DROP; f.vy = 0; f.onGround = false; f.vpose = null; f.landT = 0; });
-  } else { G.phase = 'countdown'; sfx.bell(); }   // ding-ding-ding: the round is about to start
+  } else { G.phase = 'countdown'; sfx.beep(); }
 }
 /* ---------- pre-fight sky-drop: fall, slam onto the ground, a short landing frame, idle, then 3-2-1-FIGHT ---------- */
 const INTRO_DROP = 1000, INTRO_LAND = 16, INTRO_HOLD = 24; // drop height (px), landing-frame time, pause before countdown
@@ -1740,7 +1751,7 @@ function updateIntro() {
   }
   if (fighters.every(f => f.onGround && !f.vpose)) {
     if (!G.introDone) G.introDone = G.timer;
-    if (G.timer - G.introDone >= INTRO_HOLD) { G.introDone = 0; G.phase = 'countdown'; G.timer = 0; sfx.bell(); } // controls unlock after FIGHT!
+    if (G.timer - G.introDone >= INTRO_HOLD) { G.introDone = 0; G.phase = 'countdown'; G.timer = 0; sfx.beep(); } // controls unlock after FIGHT!
   }
 }
 function endRound(winner) {
@@ -1952,15 +1963,6 @@ function drawMontage() {
     p.t++;
   }
   g.restore(); GO.fx = GO.fx.filter(p => p.t < 14);
-  if (dance) { // song position + the routine's active section, over a progress bar
-    const t = RK.step.t, bx = W / 2 - 300, by = 128;
-    g.save(); g.fillStyle = 'rgba(8,4,4,.65)'; g.fillRect(bx, by, 600, 44);
-    g.fillStyle = '#ffe6c8'; g.font = '600 16px "Segoe UI", Arial, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'top';
-    g.fillText(`${t.toFixed(1).padStart(4, '0')}s / ${RK.dur.toFixed(1)}s - Active: ${RK.step.section.label}`, W / 2, by + 6);
-    g.fillStyle = 'rgba(255,255,255,.15)'; g.fillRect(bx + 14, by + 30, 572, 6);
-    g.fillStyle = '#ff4a5a'; g.fillRect(bx + 14, by + 30, 572 * clamp(t / RK.dur, 0, 1), 6);
-    g.restore();
-  }
 }
 
 /* =====================================================================
@@ -2265,7 +2267,7 @@ function update() {
 
   if (G.phase === 'countdown') {
     G.timer++;
-    if (G.timer >= COUNTDOWN * 60) { G.phase = 'fight'; G.fightBanner = 70; clearBuffers(); sfx.fight(); }
+    if (G.timer >= COUNTDOWN * 60) { G.phase = 'fight'; G.fightBanner = 70; clearBuffers(); sfx.bell(); sfx.fight(); } // "FIGHT!": ring bell at full volume
     else if (G.timer % 60 === 0) sfx.beep();
   }
   if (G.fightBanner > 0) G.fightBanner--;
