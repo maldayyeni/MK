@@ -124,16 +124,30 @@ let AC = null, noiseBuf = null, soundOn = true;
 function initAudio() {
   try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch (e) { AC = null; }
 }
+/* ---------- mix: SFX bus (1.0) + combat-music bus (0.25 while fighting) ----------
+   Every synthesized sound goes through the SFX bus and is tracked, so the final K.O. can cut it dead; the combat
+   music has its own bus, kept low so punches, kicks and hits sit clearly on top. Victory songs (victory.mp3 /
+   Rokaia's) bypass both and play at full master volume, alone. */
+const MIX = { sfx: null, music: null, active: new Set(), COMBAT: .25, cutDone: false };
+function sfxBus() {
+  if (!MIX.sfx) { MIX.sfx = AC.createGain(); MIX.sfx.gain.value = 1; MIX.sfx.connect(AC.destination); }
+  return MIX.sfx;
+}
+// once the match is decided (final K.O.) and through the victory + game-over screens, fight sounds are silent
+const matchDecided = () => G.phase === 'victory' || G.phase === 'gameover'
+  || (G.phase === 'roundEnd' && G.winnerIdx >= 0 && fighters[G.winnerIdx] && fighters[G.winnerIdx].wins >= 2);
+const track = n => { MIX.active.add(n); n.onended = () => MIX.active.delete(n); };
+function cutAllSfx() { for (const n of MIX.active) { try { n.stop(); } catch (e) {} } MIX.active.clear(); }
 function tone(f, d, type = 'square', v = .12, f2 = null, delay = 0) {
-  if (!AC || !soundOn) return;
+  if (!AC || !soundOn || matchDecided()) return;
   const t = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
   o.type = type; o.frequency.setValueAtTime(f, t);
   if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
   g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
-  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + d + .03);
+  o.connect(g).connect(sfxBus()); o.start(t); o.stop(t + d + .03); track(o);
 }
 function noise(d, v = .3, freq = 1000, ftype = 'lowpass', f2 = null, delay = 0) {
-  if (!AC || !soundOn) return;
+  if (!AC || !soundOn || matchDecided()) return;
   if (!noiseBuf) {
     noiseBuf = AC.createBuffer(1, AC.sampleRate * 1.5, AC.sampleRate);
     const ch = noiseBuf.getChannelData(0); for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
@@ -142,7 +156,66 @@ function noise(d, v = .3, freq = 1000, ftype = 'lowpass', f2 = null, delay = 0) 
   s.buffer = noiseBuf; fl.type = ftype; fl.frequency.setValueAtTime(freq, t);
   if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t + d);
   g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
-  s.connect(fl).connect(g).connect(AC.destination); s.start(t); s.stop(t + d + .03);
+  s.connect(fl).connect(g).connect(sfxBus()); s.start(t); s.stop(t + d + .03); track(s);
+}
+// the ring bell before each round: three metallic strikes (inharmonic partials, long ring) at FULL volume
+function ringBell() {
+  if (!AC || !soundOn || matchDecided()) return;
+  const partials = [[1, .5], [2.76, .28], [5.4, .14], [8.93, .08]], f0 = 640;
+  for (let k = 0; k < 3; k++) {
+    const t = AC.currentTime + k * .28, dur = k === 2 ? 2.2 : .9;
+    for (const [m, v] of partials) {
+      const o = AC.createOscillator(), g = AC.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(f0 * m, t);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v * 1.0, t + .004); g.gain.exponentialRampToValueAtTime(.0001, t + dur / m ** .35);
+      o.connect(g).connect(sfxBus()); o.start(t); o.stop(t + dur + .05); track(o);
+    }
+  }
+}
+// combat music: a procedural fight loop (kick, snare, hats, driving minor bass) scheduled ahead on the audio clock,
+// on its own bus at MIX.COMBAT (0.25) while the fight is on, silent otherwise
+const BGM = { on: false, next: 0, step: 0, BPM: 132 };
+const BGM_BASS = [45, 45, 57, 45, 48, 45, 50, 52, 45, 45, 57, 45, 43, 45, 47, 48]; // MIDI notes, A minor riff
+const midiHz = n => 440 * Math.pow(2, (n - 69) / 12);
+function musicBus() {
+  if (!MIX.music) { MIX.music = AC.createGain(); MIX.music.gain.value = 0; MIX.music.connect(AC.destination); }
+  return MIX.music;
+}
+function bgmVoice(t, i) {
+  const out = musicBus(), sixteenth = 60 / BGM.BPM / 4;
+  const hit = (freq, f2, dur, v, type) => { const o = AC.createOscillator(), g = AC.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t); if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur); g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur); o.connect(g).connect(out); o.start(t); o.stop(t + dur + .02); };
+  const hiss = (dur, v, freq, ftype) => { if (!noiseBuf) return; const s = AC.createBufferSource(), fl = AC.createBiquadFilter(), g = AC.createGain(); s.buffer = noiseBuf; fl.type = ftype; fl.frequency.value = freq; g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur); s.connect(fl).connect(g).connect(out); s.start(t, Math.random()); s.stop(t + dur + .02); };
+  if (i % 4 === 0 || i === 10) hit(150, 45, .22, .9, 'sine');                 // kick
+  if (i === 4 || i === 12) { hiss(.16, .55, 1800, 'bandpass'); hit(220, 160, .08, .25, 'triangle'); } // snare
+  if (i % 2 === 1) hiss(.04, .18, 7000, 'highpass');                          // hats
+  hit(midiHz(BGM_BASS[i]), null, sixteenth * .9, .32, 'sawtooth');            // bass
+  if (i % 8 === 0) hit(midiHz(BGM_BASS[i] + 24), midiHz(BGM_BASS[i] + 24) * .98, sixteenth * 3.5, .07, 'square'); // stab
+}
+function bgmStart() {
+  if (!AC || BGM.on) return;
+  if (!noiseBuf) noise(.001, 0);                               // (builds the shared noise buffer)
+  BGM.on = true; BGM.next = AC.currentTime + .05; BGM.step = 0;
+  const g = musicBus().gain; g.cancelScheduledValues(AC.currentTime); g.setTargetAtTime(soundOn ? MIX.COMBAT : 0, AC.currentTime, .25);
+}
+function bgmStop(hard) {
+  if (!BGM.on || !AC) { BGM.on = false; return; }
+  BGM.on = false;
+  const g = musicBus().gain; g.cancelScheduledValues(AC.currentTime);
+  if (hard) g.setValueAtTime(0, AC.currentTime); else g.setTargetAtTime(0, AC.currentTime, .08);
+}
+function bgmPump() { // keep ~0.2s of the loop scheduled ahead of the audio clock
+  if (!BGM.on || !AC) return;
+  const sixteenth = 60 / BGM.BPM / 4;
+  while (BGM.next < AC.currentTime + .2) { bgmVoice(BGM.next, BGM.step); BGM.next += sixteenth; BGM.step = (BGM.step + 1) % 16; }
+}
+// what should be heard right now, from the (synced) game phase — runs every frame on the host and an online guest
+function audioDirector() {
+  if (!AC) return;
+  const fighting = G.phase === 'fight' && !matchDecided();
+  if (fighting && !BGM.on) bgmStart(); else if (!fighting && BGM.on) bgmStop(G.phase === 'roundEnd' || matchDecided());
+  bgmPump();
+  if (matchDecided()) { if (!MIX.cutDone) { MIX.cutDone = true; cutAllSfx(); bgmStop(true); } } // final K.O.: dead silence, then the victory song
+  else MIX.cutDone = false;
 }
 const sfx = {
   whoosh: () => noise(.13, .14, 2600, 'bandpass', 700),
@@ -157,6 +230,7 @@ const sfx = {
   gun:    () => { noise(.4, .9, 6000, 'lowpass', 200); tone(70, .25, 'square', .3, 30); },
   boom:   () => { noise(.8, .7, 900, 'lowpass', 60); tone(60, .6, 'sine', .6, 25); },
   beep:   () => tone(520, .18, 'square', .12),
+  bell:   () => ringBell(),                       // ring bell before the round: full volume
   fight:  () => { tone(392, .15, 'sawtooth', .15); tone(523, .15, 'sawtooth', .15, null, .12); tone(784, .5, 'sawtooth', .18, null, .24); },
   ko:     () => { tone(220, 1.2, 'sawtooth', .2, 55); noise(1, .4, 600, 'lowpass', 80); },
   win:    () => [523, 659, 784, 1046].forEach((f, i) => tone(f, .28, 'triangle', .16, null, i * .13))
@@ -1645,7 +1719,7 @@ function startRound() {
   if (G.round === 1 && SKY_DROP_INTRO) { // optional SKY-DROP intro — both fall from high above the screen onto their marks
     G.phase = 'intro';
     fighters.forEach(f => { f.y = GROUND - INTRO_DROP; f.vy = 0; f.onGround = false; f.vpose = null; f.landT = 0; });
-  } else { G.phase = 'countdown'; sfx.beep(); }
+  } else { G.phase = 'countdown'; sfx.bell(); }   // ding-ding-ding: the round is about to start
 }
 /* ---------- pre-fight sky-drop: fall, slam onto the ground, a short landing frame, idle, then 3-2-1-FIGHT ---------- */
 const INTRO_DROP = 1000, INTRO_LAND = 16, INTRO_HOLD = 24; // drop height (px), landing-frame time, pause before countdown
@@ -1666,7 +1740,7 @@ function updateIntro() {
   }
   if (fighters.every(f => f.onGround && !f.vpose)) {
     if (!G.introDone) G.introDone = G.timer;
-    if (G.timer - G.introDone >= INTRO_HOLD) { G.introDone = 0; G.phase = 'countdown'; G.timer = 0; sfx.beep(); } // controls unlock after FIGHT!
+    if (G.timer - G.introDone >= INTRO_HOLD) { G.introDone = 0; G.phase = 'countdown'; G.timer = 0; sfx.bell(); } // controls unlock after FIGHT!
   }
 }
 function endRound(winner) {
@@ -3066,6 +3140,7 @@ function loop(now) {
   if (stepped && NET.role === 'host' && ++NET.snapN % SNAP_EVERY === 0) sendSnapshot();
   if ((G.phase === 'victory' || G.phase === 'gameover') && winnerDances()) rkUpdate(Math.min(100, now - (loop.prev || now))); // Rokaia's dance clock
   loop.prev = now;
+  audioDirector();                                           // combat music level, final-K.O. cut
   render();
   if (G.phase === 'gameover' && G.winnerIdx >= 0) drawMontage();
   updateOverlays();
@@ -3693,5 +3768,7 @@ $('mute').onclick = () => {
   soundOn = !soundOn; $('mute').textContent = soundOn ? '🔊 Sound' : '🔇 Muted'; blurAll();
   if (MUSIC.victory) MUSIC.victory.muted = !soundOn;  // muted music keeps playing silently so the sequence stays in sync
   if (RK.gain) RK.gain.gain.value = soundOn ? 1 : 0;   // Rokaia's song too (her dance keeps following it)
+  if (MIX.music) MIX.music.gain.value = soundOn && BGM.on ? MIX.COMBAT : 0;
+  if (!soundOn) cutAllSfx();
 };
 preloadMusic();
