@@ -1030,9 +1030,11 @@ const ROSTER = {
             color: '#ff4a7a', special: 'flower', specialName: 'HEART BLAST!', hud: 'HEART', hitWord: 'HEARTBROKEN!', hitColor: '#ff4a6a', tag: 'Royal heartbreaker' },
   lulu:   { id: 'lulu', name: 'LULU', base: 'lulu', anims: LULU_ANIM, frame: luluFrame, idle: { speed: .07, amp: 2 }, victoryFrom: 3.8,
             portrait: 'lulu_portrait.png', avatar: [.36, .01, .33], lieArt: true, // select-card art; head crop [x, y, size] of it
+            cleanWhite: { region: [0, 1, 0, 1], lum: 230, minPx: 30, headY: .22, minPxHead: 120 },          // wears no white: clear every trapped gap
             color: '#4aa8ff', special: 'shuriken', specialName: 'SHURIKEN WAVE!', hud: 'SHURIKEN', hitWord: 'SLICED!', hitColor: '#3aa0ff', tag: 'Shuriken ninja' },
   rokaia: { id: 'rokaia', name: 'ROKAIA', base: 'rokaia', anims: ROKAIA_ANIM, frame: rokaiaFrame, idle: { speed: .06, amp: 1.5 }, victoryFrom: 3.8,
             portrait: RK_DIR + 'rokaia_ref_1.png', avatar: [.3, .04, .42], lieArt: true, dance: true, // match win: 27s music dance
+            cleanWhite: { region: [0, 1, 0, 1], lum: 230, minPx: 30, headY: .22, minPxHead: 120 },          // wears no white: clear every trapped gap
             color: '#ff3a5a', special: 'whip', specialName: 'PONYTAIL WHIP!', hud: 'WHIP', hitWord: 'WHIPPED!', hitColor: '#ff4a5a', tag: 'Ponytail fighter' }
 };
 const ROSTER_ORDER = ['moe', 'joe', 'romana', 'lulu', 'rokaia'];
@@ -1296,7 +1298,10 @@ function clearPockets(F, o) {
       if (xx < x0 || xx >= x1 || yy < y0 || yy >= y1) inside = false;
       for (const j of [xx > 0 ? i - 1 : -1, xx < w - 1 ? i + 1 : -1, i - w, i + w]) if (j >= 0 && j < N && !seen[j] && white(j)) { seen[j] = 1; q[qt++] = j; }
     }
-    if (!inside || qt > maxPx) continue;
+    // minPx: tiny spots stay; in the head band (top headY of the frame, where eye whites and teeth are) the limit
+    // is minPxHead (s is the pocket's first pixel in row order, i.e. its top row)
+    const minPx = o.headY != null && y < h * o.headY ? o.minPxHead : (o.minPx || 0);
+    if (!inside || qt > maxPx || qt < minPx) continue;
     for (let k = 0; k < qt; k++) { d[q[k] * 4 + 3] = 0; cleared[q[k]] = 1; }
   }
   // soften the pale anti-aliased rim around each cleared pocket (2px) so no white outline is left behind
@@ -1328,10 +1333,10 @@ function sizeFrame(F, s) {
 }
 function buildAnim(K, spec, nFrames) {
   let fr = sliceFrames(K, nFrames, spec.detach && spec.detach.effect, spec.caption, spec.loose, spec.rows);
-  if (spec.sameHeight) fr = fr.map(F => sizeFrame(F, fr[0].h / F.h)); // e.g. the 2-pose hands-on-waist sheet
   if (K.flip && fr.length > 1) fr.reverse();              // a left-facing sheet was mirrored: frame 1 is now on the right
   if (spec.mirror) spec.mirror.forEach(i => { if (fr[i]) fr[i] = mirrorFrame(fr[i]); });
   if (spec.pockets) fr.forEach(F => clearPockets(F, spec.pockets));
+  if (spec.sameHeight) fr = fr.map(F => sizeFrame(F, fr[0].h / F.h)); // e.g. the 2-pose hands-on-waist sheet (after cleaning: it resizes the canvas)
   if (spec.use) fr = spec.use.map(i => fr[Math.min(i, fr.length - 1)]);
   // scale: k (screen px per file px) when given, else the tallest frame — or frame `fit` — is h tall (or the widest is w)
   const k = spec.k || (spec.w ? spec.w / Math.max(...fr.map(F => F.w)) : spec.h / (spec.fit != null ? fr[spec.fit].h : Math.max(...fr.map(F => F.h))));
@@ -1388,7 +1393,9 @@ async function loadCharacter(C) {
       const file = spec.file[fi], img = await loadImgFile([`${file}?v=${ANIM_V}`, file]);
       if (!img) continue;
       const n = Array.isArray(spec.frames) ? spec.frames[fi] : spec.frames;
-      out[name] = buildAnim(keyedFile(img, file, spec.faces || 1, spec.erase), spec, n); out.own[name] = true;
+      // characters that wear no white (cleanWhite) get every enclosed white gap cleared in every frame
+      const sp = C.cleanWhite && !spec.pockets ? { ...spec, pockets: C.cleanWhite } : spec;
+      out[name] = buildAnim(keyedFile(img, file, spec.faces || 1, spec.erase), sp, n); out.own[name] = true;
       out.from[name] = `${file} (${n} frame${n > 1 ? 's' : ''}, sX ${out[name].frames.map(F => F.srcX).join('/')})`;
       return;
     }
