@@ -329,7 +329,7 @@ const ANIMS = [
       { sheet: 'sweep', f: 3 },
       { sheet: 'sweep', f: 4, beats: 2, tag: 'peak + breath' }] },
   { id: 'music', label: 'Victory Music · Synced Routine', group: 'Victory', fps: 5, loop: true, victory: true, music: true, needs: ['sweep', 'cross', 'waist'],
-    hint: `Driven by "${SONG_FILE}": intro sweep (0–4s), crossover (4–14s) and hands-on-waist (14–24s) at an energy-scaled FPS that snaps to the detected beats, then a slow finale sweep to the end. Speed sets the base FPS of the beat sections; ←/→ seek 1s.`,
+    hint: `Driven by "${SONG_FILE}": intro sweep (0–4s), crossover (4–14s, 2 frames per beat, max 4.5 FPS) and hands-on-waist (14–24s, 1 sway per drum hit, max 2.2 FPS) locked to the song's tempo, then a 3-second finale sweep peaking at 27.0s. ←/→ seek 1s.`,
     build: () => musicSections().map((s, i) => ({ sheet: s.sheet, f: 0, tag: s.part, t0: s.t0, t1: s.t1, sec: i })) },
   { id: 'ref0', label: 'Reference · full body', group: 'Reference', fps: 1, loop: true, needs: ['ref0'], ref: true,
     hint: 'rokaia_ref_0.png', build: () => [{ sheet: 'ref0', f: 0, extra: 1000 }] },
@@ -469,10 +469,16 @@ const SONG_MAP = [ // [start, end) in seconds; the last section runs to the end 
 // share of a sweep section each frame takes: chest gather, arms start (held), opening, opening, full 180°.
 // The full extension arrives in the last ~12% of the section, so it peaks right at 4.0s / at the 27.0s loop point.
 const SWEEP_WEIGHTS = [1, 1.2, .8, .8, .5];
+// beat sections: frames per beat, top speed, and how early (share of the step) a detected hit may trigger the step
+const SONG_BPM = 100;        // felt tempo of the song stretched to 27.0s (~107 BPM original); used until the analyser has its own reading
+const BEAT_FEEL = {
+  cross: { perBeat: 2, maxFps: 4.5, lock: .8 },   // arm out on the beat, crossover on the off-beat: ~3.6 FPS
+  waist: { perBeat: 1, maxFps: 2.2, lock: .85 }   // one sway per main drum/bass hit: ~1.8 FPS
+};
 const MUS = {
   ctx: null, buf: null, src: null, an: null, gain: null, freq: null, wave: null, el: null,
   ready: false, loading: null, playing: false, muted: false, startAt: 0, offset: 0, dur: 0, last: 0,
-  sec: -1, phase: 0, frame: 0, step: null, energy: 0, peak: .05, bassAvg: 0, lastBeat: -1, beats: [], bpm: 0, bounce: 0, fpsNow: 0
+  sec: -1, lastStep: -1, frame: 0, step: null, energy: 0, peak: .05, bassAvg: 0, lastBeat: -1, beats: [], bpm: 0, bounce: 0, fpsNow: 0
 };
 const musicSections = () => SONG_MAP.map(s => ({ ...s, t1: Math.min(s.t1, MUS.dur || s.t1) })).filter(s => s.t1 > s.t0);
 
@@ -616,7 +622,7 @@ function musicUpdate(dt) {
   const beat = analyse(t);
   let si = secs.findIndex(s => t >= s.t0 && t < s.t1); if (si < 0) si = secs.length - 1;
   const S = secs[si], A = SPR[S.sheet], n = A ? A.frames.length : 1;
-  if (si !== MUS.sec) { MUS.sec = si; MUS.phase = 0; P.i = si; renderTimeline(); }
+  if (si !== MUS.sec) { MUS.sec = si; MUS.frame = 0; MUS.lastStep = t; P.i = si; renderTimeline(); }
   if (S.mode === 'sweep') {
     // one full 0° -> 180° sweep stretched exactly over the section
     const w = SWEEP_WEIGHTS.slice(0, n), tot = w.reduce((a, b) => a + b, 0);
@@ -624,14 +630,17 @@ function musicUpdate(dt) {
     while (f < n - 1 && u >= w[f]) u -= w[f++];
     MUS.frame = f; MUS.fpsNow = n / (S.t1 - S.t0);
   } else if (MUS.playing) {
-    // tempo-reactive: frames per second rise with the music's energy; each detected beat snaps forward to the
-    // next even frame, so the pose pairs (arm out / crossover, lean / settle) land an extension on the beat
-    const rate = P.fps * (.55 + 1.5 * MUS.energy);
-    MUS.phase += rate * dt / 1000;
-    if (beat && MUS.phase % 2 > .6) MUS.phase = Math.ceil(MUS.phase / 2) * 2;
-    MUS.frame = Math.floor(MUS.phase) % n; MUS.fpsNow = rate;
+    // tempo-locked: the pace comes from the song's tempo (BEAT_FEEL frames per beat), energy only nudges it ±12%
+    // and the section's FPS cap keeps it steady. A frame change waits for a detected hit once it is due, so the
+    // moves land on the drums; if no hit comes it steps anyway, so the dance never stalls.
+    const B = BEAT_FEEL[S.sheet], T = 60 / (MUS.bpm || SONG_BPM);
+    const iv = Math.max(T / B.perBeat * (1.12 - .24 * MUS.energy), 1 / B.maxFps), since = t - MUS.lastStep;
+    if (MUS.lastStep < 0 || since < 0) MUS.lastStep = t;
+    else if ((beat && since >= iv * B.lock) || since >= iv * 1.5) {
+      MUS.frame = (MUS.frame + 1) % n; MUS.lastStep = t; MUS.bounce = 1; pulseBeat();
+    }
+    MUS.fpsNow = 1 / iv;
   }
-  if (beat) { MUS.bounce = 1; pulseBeat(); }
   MUS.bounce = Math.max(0, MUS.bounce - dt / 260);
   const amp = S.sheet === 'cross' ? 12 : S.sheet === 'waist' ? 6 : 0;         // toe-bounce on the beat
   MUS.step = { sheet: S.sheet, f: MUS.frame, lift: Math.sin(MUS.bounce * Math.PI) * amp * (.5 + MUS.energy), section: S, n };
