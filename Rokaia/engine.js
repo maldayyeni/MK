@@ -2149,9 +2149,10 @@ function drawMontage() {
 /* =====================================================================
    COMBAT
    ===================================================================== */
+// an attack's timing for this fighter: ATK plus any per-fighter tweak (same reach / damage) — host and guest alike
+function atkFor(f, type) { const o = f.char.atk && f.char.atk[type]; return o ? { ...ATK[type], ...o } : ATK[type]; }
 function startAction(f, type) {
-  const o = f.char.atk && f.char.atk[type];   // per-fighter timing tweaks (same reach / damage)
-  f.action = { type, t: 0, hit: false, d: o ? { ...ATK[type], ...o } : ATK[type] };
+  f.action = { type, t: 0, hit: false, d: atkFor(f, type) };
   if (type === 'special') {
     f.specialUsed = true;
     popup(f.char.specialName, f.x, f.y - FH - 80, f.color, 44);
@@ -2535,13 +2536,51 @@ function update() {
 }
 
 // online guest: no simulation, just animate what the host's snapshots say
+/* guest: snapshot interpolation. Every snapshot carries the host's frame number; the guest keeps the last ~half second
+   and draws the fighters INTERP_DELAY frames behind the newest host frame it has seen, blending between the two real
+   states around that moment. Jitter (packets arriving early / late) and an occasional lost snapshot then never show as
+   stutter or rubber-banding. If the buffer runs dry, it extrapolates from the last two states for a few frames. */
+// The delay adapts to the connection: it tracks how late snapshots arrive compared with the earliest ones (fast to grow
+// on a jitter spike, slow to shrink), so good Wi-Fi stays at ~4 frames and a jittery cellular link gets a bit more slack.
+const INTERP_DELAY = 4, INTERP_DELAY_MAX = 12, INTERP_MAX_EXTRA = 6, INTERP_KEEP = 40;
+const netDelay = () => clamp(Math.ceil((NET.jit || 0) + 3), INTERP_DELAY, INTERP_DELAY_MAX);
+function netBufferPush(h, f) {
+  const B = NET.buf || (NET.buf = []);
+  if (NET.est == null || h < NET.est - 600) { B.length = 0; NET.est = h; NET.jit = 0; } // first state, or host restarted
+  NET.est = Math.max(NET.est, h);                                         // newest host frame known (never runs backward)
+  const late = NET.est - h;                                               // frames behind the newest = arrival jitter
+  NET.jit = late > NET.jit ? NET.jit * .6 + late * .4 : NET.jit * .995 + late * .005;
+  let i = B.length; while (i > 0 && B[i - 1].h > h) i--;                  // keep in frame order (lossy channel is unordered)
+  if (i > 0 && B[i - 1].h === h) return;
+  B.splice(i, 0, { h, x: f.map(a => a[0]), y: f.map(a => a[1]) });
+  if (B.length > INTERP_KEEP) B.splice(0, B.length - INTERP_KEEP);
+}
+function netInterp() {
+  const B = NET.buf; if (!B || !B.length) return;
+  NET.est++;
+  const t = NET.est - netDelay();
+  let a = B[0], b = null;
+  for (let i = 1; i < B.length; i++) { if (B[i].h > t) { b = B[i]; break; } a = B[i]; }
+  fighters.forEach((f, k) => {
+    if (a.x[k] === undefined) return;
+    if (b && t >= a.h) { const u = (t - a.h) / (b.h - a.h); f.x = lerp(a.x[k], b.x[k], u); f.y = lerp(a.y[k], b.y[k], u); }
+    else if (!b && B.length > 1 && t > a.h) { // ran past the newest state: carry on along its last motion, briefly
+      const p = B[B.length - 2], s = Math.min(t - a.h, INTERP_MAX_EXTRA) / (a.h - p.h);
+      f.x = clamp(a.x[k] + (a.x[k] - p.x[k]) * s, X_MIN, X_MAX); f.y = Math.min(GROUND, a.y[k] + (a.y[k] - p.y[k]) * s);
+    } else { f.x = a.x[k]; f.y = a.y[k]; }
+  });
+}
 function guestUpdate() {
   G.frame++;
   if (G.phase === 'menu' || G.phase === 'gameover') { updateAmbient(); return; }
-  // snapshots arrive ~30/s with network jitter: glide toward the latest host position, move projectiles in between
+  // snapshots arrive ~30/s with network jitter and some loss. The guest keeps the game moving at 60 fps: positions are
+  // interpolated between real host states a few frames in the past (see netInterp), attack clocks tick on and
+  // projectiles fly between snapshots — all held still during a hit-freeze
   if (!netStalled() && !NET.hostHidden && !NET.reconnectUntil) {
-    for (const f of fighters) if (f.netX !== undefined) { f.x += (f.netX - f.x) * .5; f.y += (f.netY - f.y) * .5; }
-    for (const p of projectiles) p.x += p.vx;
+    const frozen = G.hitStop > 0; if (frozen) G.hitStop--;
+    netInterp();
+    for (const f of fighters) if (!frozen && f.action) f.action.t++;
+    if (!frozen) for (const p of projectiles) p.x += p.vx;
   }
   fighters.forEach(animateFighter);
   projectiles.forEach(fireTrail);
@@ -2587,7 +2626,14 @@ function updateAmbient() {
 function newEmber(any) { return { x: rand(0, W + 200), y: any ? rand(0, H) : H + 10, vy: -rand(.5, 1.8), vx: rand(-.2, .4), s: rand(3, 9), ph: rand(0, 600), d: rand(.4, 1.1) }; }
 
 // visual / audio events are mirrored to an online guest
-function emit(name, args) { if (NET.role === 'host') NET.ev.push([name, args]); }
+// host: queue a sound / effect for the guest. Menu + character-select sounds stay local (each side plays the other
+// player's picks itself from the 'sel' messages), and the queue is capped so a long stall can't pile up a flood.
+const EV_CAP = 240;
+function emit(name, args) {
+  if (NET.role !== 'host' || SEL.open || G.phase === 'menu') return;
+  if (NET.ev.length >= EV_CAP) NET.ev.shift();
+  NET.ev.push([name, args]);
+}
 function burst(x, y, n, colors, spd) {
   emit('b', [x, y, n, colors, spd]);
   for (let i = 0; i < n; i++) {
@@ -3408,6 +3454,8 @@ addEventListener('resize', fit); fit();
    ===================================================================== */
 const NET = {
   role: 'local', me: 0, peer: null, conn: null, ev: [], lastRx: 0,
+  fast: null,          // lossy snapshot channel (see openFast)
+  seq: 0, rxSeq: -1,   // snapshot sequence: host numbers them, the guest drops any that arrive late / out of order
   snapN: 0,            // host: frame counter for the snapshot cadence
   hostId: null,        // guest: the room to (re)connect to
   reconnectUntil: 0,   // >0 while waiting for the other player to come back (ms timestamp)
@@ -3426,10 +3474,45 @@ const netStalled = () => !!NET.conn && performance.now() - NET.lastRx > STALL_MS
 // host: freeze the simulation while Player 2 is lagging or reconnecting (so they can't be beaten while frozen)
 const netHold = () => NET.role === 'host' && IN_MATCH() && (!!NET.reconnectUntil || netStalled());
 
-function netSend(m) { if (NET.conn && NET.conn.open) NET.conn.send(m); }
+// ?netsim=<latency ms>,<jitter ms>,<loss 0..1> (e.g. ?netsim=120,40,0.1): delays every outgoing message and drops that
+// share of snapshots — for testing bad networks. Reliable messages stay in order and are never dropped.
+const NETSIM = (() => {
+  const v = new URLSearchParams(location.search).get('netsim'); if (!v) return null;
+  const [lat = 0, jit = 0, loss = 0] = v.split(',').map(Number); return { lat, jit, loss, due: 0 };
+})();
+function simSend(fn, lossy) {
+  if (!NETSIM) return fn();
+  if (lossy && Math.random() < NETSIM.loss) return;
+  const now = performance.now(); let due = now + NETSIM.lat + Math.random() * NETSIM.jit;
+  if (!lossy) due = NETSIM.due = Math.max(NETSIM.due, due);
+  setTimeout(fn, due - now);
+}
+// reliable + ordered (inputs, picks, sound / effect events, control messages)
+function netSend(m) { const c = NET.conn; if (c && c.open) simSend(() => { if (c.open) try { c.send(m); } catch (e) {} }, false); }
+// game-state snapshots: the lossy channel when it's up (a lost snapshot is simply replaced by the next one), else reliable
+function fastSend(m) {
+  const ch = NET.fast;
+  if (!ch || ch.readyState !== 'open') { netSend(m); return; }
+  const s = JSON.stringify(m); simSend(() => { if (ch.readyState === 'open') try { ch.send(s); } catch (e) {} }, true);
+}
+// the lossy snapshot channel: a pre-agreed (negotiated) data channel on the same WebRTC connection — unordered and never
+// retransmitted, so one lost packet can't hold up the newer ones behind it (on cellular / lossy Wi-Fi that head-of-line
+// wait is what causes freezes and rubber-banding). Both sides open id 100 themselves, so it needs no extra signalling.
+const FAST_ID = 100;
+function openFast(conn) {
+  closeFast();
+  const pc = conn.peerConnection; if (!pc || !pc.createDataChannel) return;
+  try {
+    const ch = pc.createDataChannel('snap', { negotiated: true, id: FAST_ID, ordered: false, maxRetransmits: 0 });
+    ch.onmessage = e => { if (NET.conn !== conn) return; let m; try { m = JSON.parse(e.data); } catch (x) { return; } onNetData(m); };
+    NET.fast = ch;
+  } catch (e) { NET.fast = null; } // not supported: snapshots stay on the reliable channel
+}
+function closeFast() { try { NET.fast && NET.fast.close(); } catch (e) {} NET.fast = null; }
 function netStatus(t) { $('netStatus').textContent = t; }
 function showNetPanel(show) { $('netPanel').classList.toggle('hidden', !show); $('menuBtns').classList.toggle('hidden', show); }
 function netTeardown() {
+  closeFast();
   try { NET.conn && NET.conn.close(); } catch (e) {}
   try { NET.peer && NET.peer.destroy(); } catch (e) {}
   NET.conn = NET.peer = null; NET.role = 'local'; NET.me = 0; NET.ev = []; NET.token = null;
@@ -3544,6 +3627,8 @@ async function hostOnline(attempt = 0, keepId = null) {
       if (NET.conn === conn && !conn.open && NET.role !== 'host') netStatus('Opponent found, but their network is blocking the connection. Trying the relay…' + (ice.turn.length ? '' : NO_TURN_NOTE));
     }, 10000);
     const begin = () => {
+      if (NET.conn !== conn) return;
+      openFast(conn);
       if (NET.role === 'host') { // Player 2 is back: resume the paused match from the current state
         NET.reconnectUntil = 0; NET.lastRx = performance.now(); held[1] = {};
         conn.send({ t: 'resume' }); sendSnapshot(true);
@@ -3633,6 +3718,7 @@ function guestConnect(peer, onFirstOpen) {
     if (NET.conn !== conn) return;
     const resumed = NET.role === 'guest' && NET.reconnectUntil;
     NET.role = 'guest'; NET.me = 1; NET.lastRx = performance.now(); NET.reconnectUntil = 0; clearTimeout(NET.retryTimer);
+    openFast(conn); NET.rxSeq = -1; NET.buf = []; NET.est = null; // fresh channel: start the sequence + interpolation over
     if (resumed) { // re-send any keys still held so ROMANA doesn't lose a held block / walk
       for (const act in held[1]) if (held[1][act] && held[1][act].size) netSend({ t: 'k', a: act, d: 1 });
     } else if (onFirstOpen) onFirstOpen();
@@ -3691,14 +3777,14 @@ setInterval(() => {
 // host: Player 2 dropped — keep the room open and wait for them
 function hostLostGuest() {
   if (!IN_MATCH() && G.phase !== 'gameover') { onNetClose('Player 2 disconnected.'); return; }
-  const c = NET.conn; NET.conn = null; held[1] = {};
+  const c = NET.conn; NET.conn = null; held[1] = {}; closeFast();
   try { c && c.close(); } catch (e) {}
   NET.reconnectUntil = performance.now() + RECONNECT_MS;
 }
 // guest: lost the host — retry the same room every 2.5s until RECONNECT_MS runs out
 function guestLostHost() {
   if (NET.reconnectUntil) return;
-  const c = NET.conn; NET.conn = null;
+  const c = NET.conn; NET.conn = null; closeFast();
   try { c && c.close(); } catch (e) {}
   NET.reconnectUntil = performance.now() + RECONNECT_MS;
   const retry = () => {
@@ -3717,7 +3803,10 @@ function guestLostHost() {
 // leaving the page on purpose = Exit (no reconnect wait on the other side)
 addEventListener('pagehide', () => { try { netSend({ t: 'bye' }); NET.conn && NET.conn.close(); NET.peer && NET.peer.destroy(); } catch (e) {} });
 // host: tell the guest when this tab goes to the background (browsers pause hidden tabs, so the fight freezes)
-document.addEventListener('visibilitychange', () => { if (NET.role === 'host') netSend({ t: 'vis', h: document.hidden }); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseAllLocal();             // a backgrounded tab can't see key-ups: never leave a key held
+  if (NET.role === 'host') netSend({ t: 'vis', h: document.hidden });
+});
 
 function onNetData(m) {
   NET.lastRx = performance.now();
@@ -3727,11 +3816,19 @@ function onNetData(m) {
   if (m.t === 'resume') { NET.hostHidden = false; return; }
   // character select: the other player's pick / lock, and (guest) the final line-up from the host
   if (m.t === 'sel') {
-    if (m.p !== NET.me && SEL.side[m.p]) { SEL.side[m.p] = { i: m.i | 0, lock: !!m.lock }; if (SEL.open) { renderSelect(); selCheckStart(); } }
+    if (m.p !== NET.me && SEL.side[m.p]) {
+      const was = SEL.side[m.p], first = !SEL.heard; SEL.heard = true;
+      SEL.side[m.p] = { i: m.i | 0, lock: !!m.lock };
+      if (SEL.open && !first && !m.hello) { // the opponent's cursor / lock-in sounds play here too (MK style)
+        if (m.lock && !was.lock) sfx.selPick(); else if (!m.lock && was.lock) sfx.whoosh(); else if ((m.i | 0) !== was.i) sfx.selMove();
+      }
+      if (SEL.open) { renderSelect(); selCheckStart(); }
+    }
     if (m.hello && SEL.open) sendSel(NET.me); // they just opened their select screen: tell them our current pick
     return;
   }
   if (m.t === 'cfg') { if (NET.role === 'guest' && Array.isArray(m.c)) applyCfg(m.c); return; }
+  if (m.t === 'e') { if (NET.role === 'guest' && Array.isArray(m.e)) applyEvents(m.e); return; }
   if (NET.role === 'host') {
     if (m.t === 'k') { // guest input -> player 2
       if (m.d) { (held[1][m.a] = new Set(['net'])); pressedAt[1][m.a] = G.frame; }
@@ -3743,40 +3840,54 @@ function onNetData(m) {
 const r1 = v => Math.round(v * 10) / 10;
 function sendSnapshot(force = false) {
   if (!NET.conn || !NET.conn.open) return;
-  // back-pressure: if the channel is still busy (lag spike), skip this one — events stay queued for the next
-  const dc = NET.conn.dataChannel;
+  // sounds / hit effects ride the reliable channel, so a lost snapshot never loses a punch sound or a grunt
+  if (NET.ev.length) netSend({ t: 'e', e: NET.ev.splice(0) });
+  // back-pressure: if the channel is still busy (lag spike), skip this state — the next one replaces it anyway
+  const dc = NET.fast && NET.fast.readyState === 'open' ? NET.fast : NET.conn.dataChannel;
   if (!force && dc && dc.bufferedAmount > SNAP_BACKLOG) return;
-  netSend({
-    t: 's',
-    g: [G.phase, G.timer, G.round, G.fightBanner, G.winnerIdx, G.flash, Math.round((G.vt || 0) * 1000) / 1000],
+  const m = {
+    t: 's', n: ++NET.seq,
+    g: [G.phase, G.timer, G.round, G.fightBanner, G.winnerIdx, G.flash, Math.round((G.vt || 0) * 1000) / 1000, G.hitStop || 0, G.frame],
     f: fighters.map(f => [r1(f.x), r1(f.y), r1(f.vx), r1(f.vy), f.facing, +f.onGround, f.hp, f.action ? [f.action.type, f.action.t] : 0,
-      f.stun, f.knock, f.knockT, f.airT, +f.ko, +f.blocking, +f.walking, f.flash, +f.win, f.wins, +f.specialUsed, f.vpose || 0, +!!f.crouching, f.hitType || 0]),
-    p: projectiles.map(p => [p.type, p.owner.idx, r1(p.x), r1(p.y), p.vx, p.r, p.t]),
-    e: NET.ev.splice(0)
-  });
+      f.stun, f.knock, f.knockT, f.airT, +f.ko, +f.blocking, +f.walking, f.flash, +f.win, f.wins, +f.specialUsed, f.vpose || 0, +!!f.crouching, f.hitType || 0])
+  };
+  if (projectiles.length) m.p = projectiles.map(p => [p.type, p.owner.idx, r1(p.x), r1(p.y), p.vx, p.r, p.t]);
+  force ? netSend(m) : fastSend(m);
 }
-
-function applySnapshot(m) {
-  const prev = G.phase;
-  [G.phase, G.timer, G.round, G.fightBanner, G.winnerIdx, G.flash] = m.g;
-  G.vt = m.g[6] || 0; // host's victory clock (its music position) drives the guest's sequence
-  m.f.forEach((a, i) => {
-    const f = fighters[i];
-    // positions are smoothed toward the host's value in guestUpdate(); big jumps (round reset, knockback) snap
-    f.netX = a[0]; f.netY = a[1];
-    if (f.netSeen !== true || Math.abs(f.x - a[0]) > 160 || Math.abs(f.y - a[1]) > 160) { f.x = a[0]; f.y = a[1]; f.netSeen = true; }
-    [f.vx, f.vy, f.facing] = [a[2], a[3], a[4]];
-    f.onGround = !!a[5]; f.hp = a[6];
-    f.action = a[7] ? { type: a[7][0], t: a[7][1], hit: true } : null;
-    [f.stun, f.knock, f.knockT, f.airT] = [a[8], a[9], a[10], a[11]];
-    f.ko = !!a[12]; f.blocking = !!a[13]; f.walking = !!a[14]; f.flash = a[15]; f.win = !!a[16]; f.wins = a[17]; f.specialUsed = !!a[18]; f.vpose = a[19] || null; f.crouching = !!a[20]; f.hitType = a[21] || null;
-  });
-  projectiles = m.p.map(a => ({ type: a[0], owner: fighters[a[1]], x: a[2], y: a[3], vx: a[4], r: a[5], t: a[6] }));
-  for (const [n, args] of m.e) {
+// guest: sounds / effects the host just played
+function applyEvents(list) {
+  for (const [n, args] of list) {
     if (n === 's') { if (sfx[args[0]]) sfx[args[0]](); } else if (n === 'b') burst(...args); else if (n === 'd') dust(...args);
     else if (n === 'p') popup(...args); else if (n === 'k') shake(...args); else if (n === 'r') debris(...args);
     else if (n === 'sb') starburst(...args);
   }
+}
+
+function applySnapshot(m) {
+  if (m.n !== undefined) { if (m.n <= NET.rxSeq) return; NET.rxSeq = m.n; } // late / out-of-order snapshot: already newer
+  if (!fighters.length) return;
+  const prev = G.phase;
+  [G.phase, G.timer, G.round, G.fightBanner, G.winnerIdx, G.flash] = m.g;
+  G.vt = m.g[6] || 0; // host's victory clock (its music position) drives the guest's sequence
+  G.hitStop = m.g[7] || 0; // hit-freeze: the guest pauses its in-between motion too
+  if (m.g[8] !== undefined) netBufferPush(m.g[8], m.f);
+  m.f.forEach((a, i) => {
+    const f = fighters[i];
+    // positions go through the interpolation buffer (netInterp); the first state of a session is shown straight away
+    if (f.netSeen !== true) { f.x = a[0]; f.y = a[1]; f.netSeen = true; }
+    [f.vx, f.vy, f.facing] = [a[2], a[3], a[4]];
+    f.onGround = !!a[5]; f.hp = a[6];
+    // attacks: the guest runs the action clock itself between snapshots (60 fps frames); a snapshot only corrects it
+    // when it has drifted, so the animation never steps backward
+    const at = a[7], cur = f.action;
+    if (!at) f.action = null;
+    else if (cur && cur.type === at[0] && Math.abs(cur.t - at[1]) <= 4) cur.t = Math.max(cur.t, at[1]);
+    else f.action = { type: at[0], t: at[1], hit: true, d: atkFor(f, at[0]) };
+    [f.stun, f.knock, f.knockT, f.airT] = [a[8], a[9], a[10], a[11]];
+    f.ko = !!a[12]; f.blocking = !!a[13]; f.walking = !!a[14]; f.flash = a[15]; f.win = !!a[16]; f.wins = a[17]; f.specialUsed = !!a[18]; f.vpose = a[19] || null; f.crouching = !!a[20]; f.hitType = a[21] || null;
+  });
+  projectiles = (m.p || []).map(a => ({ type: a[0], owner: fighters[a[1]], x: a[2], y: a[3], vx: a[4], r: a[5], t: a[6] }));
+  if (m.e) applyEvents(m.e);
   if (G.phase !== 'menu') { $('start').classList.add('hidden'); showNetPanel(false); }
   if (prev !== 'countdown' && G.phase === 'countdown') fighters.forEach(f => { f.trail = []; f.hpShown = f.hp; });
   if (G.phase === 'victory' && prev !== 'victory') playVictoryMusic();
@@ -3882,7 +3993,7 @@ const canControl = p => SEL.mode === 'local' || p === NET.me;
 function openSelect(mode, cpu = false) {
   const idx = id => Math.max(0, ROSTER_ORDER.indexOf(id));
   MATCH.cpu = mode === 'local' && cpu;
-  Object.assign(SEL, { open: true, mode, starting: false, side: [{ i: idx(MATCH.chars[0]), lock: false }, { i: idx(MATCH.chars[1]), lock: false }] });
+  Object.assign(SEL, { open: true, mode, starting: false, heard: false, side: [{ i: idx(MATCH.chars[0]), lock: false }, { i: idx(MATCH.chars[1]), lock: false }] });
   $('start').classList.add('hidden'); $('over').classList.add('hidden'); showNetPanel(false); $('select').classList.remove('hidden');
   renderSelect();
   if (mode === 'online') sendSel(NET.me, true); // hello: the other side answers with its current pick
@@ -3923,7 +4034,7 @@ function selCheckStart() {
   }, 750);
 }
 // online guest: the host has fixed the line-up -> build the same fighters, snapshots take it from here
-function applyCfg(ids) { makeFighters(ids[0], ids[1]); SEL.starting = true; closeSelect(); }
+function applyCfg(ids) { makeFighters(ids[0], ids[1]); SEL.starting = true; closeSelect(); sfx.fight(); } // (the host plays it as both lock in)
 function renderSelect() {
   syncVsBanner();
   selEls().forEach((el, p) => {
