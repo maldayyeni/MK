@@ -1120,6 +1120,22 @@ function blockK(f) {
   const df = f._bkF == null ? 1 : clamp(G.frame - f._bkF, 0, BLK_N); f._bkF = G.frame;
   return (f._bk = clamp((f._bk || 0) + (f.blocking ? df : -df), 0, BLK_N));
 }
+// his jab, keyframed on the action clock: guard (0) eases into the wind-up (1, fists pulled in), snaps to full
+// extension (2) on impact and holds, then retracts through the same frames in reverse (2 -> 1 -> 0). Between keys the
+// neighbouring frames crossfade, so the arm travels instead of popping.
+function haithamPunch(f) {
+  const a = f.action, d = (a && a.d) || ATK.punch, t = a ? a.t : 0, S = d.start, E = S + d.active, R = d.rec;
+  const keys = [[0, 0], [S * .3, 0], [S, 1], [S + 1, 2], [E + R * .2, 2], [E + R * .6, 1], [E + R, 0]];
+  let p = 0;
+  for (let k = 1; k < keys.length; k++) {
+    const [t0, p0] = keys[k - 1], [t1, p1] = keys[k];
+    if (t <= t1) { const u = t1 > t0 ? clamp((t - t0) / (t1 - t0), 0, 1) : 1; p = p0 + (p1 - p0) * u * u * (3 - 2 * u); break; }
+    p = p1;
+  }
+  // the nearer frame is drawn solid and the other faded over it (never above 50%, so no double silhouette)
+  const n = Math.round(p), o = p < n ? n - 1 : n + 1, w = Math.abs(p - n);
+  return w > .04 && o >= 0 && o <= 2 ? ['punch', n, { i: o, a: w }] : ['punch', n];
+}
 function haithamFrame(st, f) {
   const bk = blockK(f);
   switch (st.s) {
@@ -1129,7 +1145,7 @@ function haithamFrame(st, f) {
     case 'block': return ['block', bk < BLK_N / 2 ? 0 : 1];                       // raise guard -> cover up
     case 'idle': if (bk > 0) return ['block', bk < BLK_N / 2 ? 0 : 1];             // let go: the same frames in reverse
       return ['idle', 0];
-    case 'punch': return ['punch', fwdBack(st, [0, 1], 2)];
+    case 'punch': return haithamPunch(f);
     case 'kick': return ['kick', fwdBack(st, [0, 1, 2], 3)];
     case 'airPunch': return ['punch', 2];
     case 'airKick': return ['kick', 3];
@@ -1179,7 +1195,7 @@ const ROSTER = {
             portrait: HT_DIR + 'T_Haitham_Portrait.png', avatar: [.26, .1, .5], lieArt: true, cigar: true,   // match win: spin + cigar close-up
             cleanWhite: { region: [0, 1, 0, 1], lum: 236, minPx: 60, headY: .22, minPxHead: 200 },        // wears no white (cigar smoke stays)
             heavyHits: true,                                                                                   // MK-style punch impacts
-            atk: { punch: { start: 8, active: 5, rec: 13 } },                                                  // 3-frame jab: held longer so it reads like the others
+            atk: { punch: { start: 10, active: 6, rec: 16 } },                                                 // 3-frame jab, keyframed + crossfaded (haithamPunch)
             color: '#2a5cff', special: 'pistols', specialName: 'DOUBLE TAP!', hud: 'PISTOLS', hitWord: 'BANG BANG!', hitColor: '#ffd23a', tag: 'The Boss' }
 };
 const ROSTER_ORDER = ['moe', 'joe', 'romana', 'lulu', 'rokaia', 'haitham'];
@@ -1613,15 +1629,16 @@ function pickState(f) {
 }
 // current animation frame + a small whole-pixel idle breathing offset (MOE: slower and smaller)
 function frameOf(f) {
-  const st = pickState(f), [anim, i] = f.char.frame(st, f, f.spr), A = f.spr[anim] || f.spr.idle;
+  const st = pickState(f), [anim, i, mix] = f.char.frame(st, f, f.spr), A = f.spr[anim] || f.spr.idle;
   const F = A.frames[Math.min(i, A.frames.length - 1)], I = f.char.idle;
+  const F2 = mix && A.frames[mix.i], alpha = F2 ? mix.a : 0; // optional crossfade into the next frame (HAITHAM's jab)
   const bob = (anim === 'idle' && f.onGround && !f.action && f.knock === 'none'
     ? Math.round(Math.sin((G.frame + f.idx * 40) * I.speed * (f.win ? 3 : 1)) * I.amp * (f.win ? 2.5 : 1)) : 0) - Math.round(A.lift || 0)
     - (st.s === 'dance' && RK.step ? Math.round(RK.step.lift) : 0); // dance toe-bounce
   // with real hit-reaction art the fighter flies back upright (no rotation); a borrowed idle pose is tipped over instead.
   // Art that already lies on the ground (lieArt: LULU's KO frames) is never rotated.
   const noRot = (st.s === 'hitAir' && A !== f.spr.idle) || (!!f.char.lieArt && st.s === 'down');
-  return { A, F, anim, pose: anim, state: st.s, bob, noRot, sx: 1, sy: 1 };
+  return { A, F, F2, alpha, anim, pose: anim, state: st.s, bob, noRot, sx: 1, sy: 1 };
 }
 // slice the current frame out of its animation strip and draw it with the feet at (0,0); smoothing off = crisp edges
 function drawAnimFrame(g, A, F, dx = 0, dy = 0, big = false) {
@@ -1739,6 +1756,7 @@ function renderFighter(f) {
     const recoil = f.stun > 0 ? -Math.round(10 * f.stun / 18) : 0;
     g.imageSmoothingEnabled = false; // already resized with high quality at load: draw 1:1, pixel-crisp
     drawAnimFrame(g, fr.A, fr.F, recoil, fr.bob); // slice this state's frame out of its batch strip
+    if (fr.F2) { g.globalAlpha = fr.alpha; drawAnimFrame(g, fr.A, fr.F2, recoil, fr.bob); g.globalAlpha = 1; }
   }
   // special props
   const a = f.action;
@@ -2260,7 +2278,7 @@ function updateFighter(f, o, canAct) {
   else if (f.stun > 0) f.stun--;
   else {
     if (f.onGround && !f.action) f.facing = o.x >= f.x ? 1 : -1;
-    // Up + Block + Kick together: auto-chaining special — fires the special again and again, 1 second apart,
+    // Up + Block + Kick together: auto-chaining special — fires the special again and again, 0.25 s apart,
     // until the opponent is K.O. (ignores the once-per-round rule; cleared when the round resets)
     if (canAct && !f.chain && isHeld(p, 'jump') && isHeld(p, 'block') && isHeld(p, 'kick')) {
       f.chain = { next: G.frame }; consume(p, 'jump'); consume(p, 'kick');
@@ -2268,7 +2286,7 @@ function updateFighter(f, o, canAct) {
     }
     if (f.chain && (o.hp <= 0 || o.ko)) f.chain = null;
     if (canAct && f.chain && !f.action && f.onGround && G.frame >= f.chain.next) {
-      startAction(f, 'special'); f.chain.next = G.frame + ATK.special.total + 60; // 1s after each special ends
+      startAction(f, 'special'); f.chain.next = G.frame + ATK.special.total + 15; // 0.25 s after each special ends
     }
     if (canAct && !f.action) {
       // special has priority and works on its own key alone (even while holding block / moving);
