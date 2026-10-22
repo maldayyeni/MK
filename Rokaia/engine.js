@@ -173,6 +173,34 @@ function noise(d, v = .3, freq = 1000, ftype = 'lowpass', f2 = null, delay = 0) 
   g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
   s.connect(fl).connect(g).connect(sfxBus()); s.start(t); s.stop(t + d + .03); track(s);
 }
+// hurt vocal on a punch / kick / special hit: a pitched glottal buzz (saw) shaped by three vowel formants + breath,
+// with a quick rise-then-drop pitch contour ("uhh!" / "ah!"). Each hit varies pitch / vowel / length a little.
+const VOICES = {
+  m:  { f0: 130, len: .24, vowels: [[650, 1100, 2450], [560, 980, 2400], [720, 1240, 2550]], breath: 1300 }, // MOE, JOE
+  md: { f0: 98,  len: .27, vowels: [[560, 950, 2300], [500, 880, 2250]], breath: 950, rough: true },        // HAITHAM: deeper, rougher
+  f:  { f0: 330, len: .27, vowels: [[900, 1600, 2950], [820, 1450, 2800], [760, 1750, 3050]], breath: 2600 } // ROMANA, LULU, ROKAIA
+};
+function hurtVoice(kind) {
+  const V = VOICES[kind]; if (!V || !AC || !soundOn || matchDecided()) return;
+  const t = AC.currentTime, j = .92 + Math.random() * .16, f0 = V.f0 * j, d = V.len * (.85 + Math.random() * .3);
+  const F = V.vowels[Math.floor(Math.random() * V.vowels.length)];
+  const o = AC.createOscillator(), env = AC.createGain(), out = AC.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(f0 * .9, t); o.frequency.linearRampToValueAtTime(f0 * 1.18, t + .035); // pitch jumps up on impact...
+  o.frequency.exponentialRampToValueAtTime(f0 * .62, t + d);                                       // ...then falls off
+  const vib = AC.createOscillator(), vg = AC.createGain(); vib.frequency.value = V.rough ? 31 : 22; vg.gain.value = f0 * (V.rough ? .06 : .025);
+  vib.connect(vg).connect(o.frequency);                                                          // throat flutter
+  env.gain.setValueAtTime(0.0001, t); env.gain.exponentialRampToValueAtTime(1, t + .012); env.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(env);
+  F.forEach((fq, i) => {                                                                           // vowel formants (parallel band-passes)
+    const bp = AC.createBiquadFilter(), g = AC.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = fq * (kind === 'f' ? 1 : .98); bp.Q.value = [6, 9, 11][i]; g.gain.value = [1.6, .9, .45][i];
+    env.connect(bp).connect(g).connect(out);
+  });
+  out.gain.value = kind === 'f' ? .5 : .62; out.connect(sfxBus());
+  o.start(t); vib.start(t); o.stop(t + d + .05); vib.stop(t + d + .05); track(o); track(vib);
+  noise(d * .7, .1, V.breath, 'bandpass', V.breath * .5);                                           // breath through the cry
+}
 // the ring bell at "FIGHT!": three metallic strikes (inharmonic partials, long ring) at FULL volume
 function ringBell() {
   if (!AC || !soundOn || matchDecided()) return;
@@ -232,6 +260,7 @@ function audioDirector() {
   if (matchDecided()) { if (!MIX.cutDone) { MIX.cutDone = true; cutAllSfx(); bgmStop(true); } } // final K.O.: dead silence, then the victory song
   else MIX.cutDone = false;
 }
+const hurtSfx = f => { const k = { m: 'hurtM', md: 'hurtMd', f: 'hurtF' }[f.char.voice]; if (k) sfx[k](); };
 const sfx = {
   whoosh: () => noise(.13, .14, 2600, 'bandpass', 700),
   hit:    () => { noise(.09, .5, 1800, 'lowpass', 300); tone(150, .12, 'sine', .5, 50); },
@@ -246,6 +275,12 @@ const sfx = {
   boom:   () => { noise(.8, .7, 900, 'lowpass', 60); tone(60, .6, 'sine', .6, 25); },
   beep:   () => tone(520, .18, 'square', .12),
   bell:   () => ringBell(),                       // ring bell before the round: full volume
+  hurtM:  () => hurtVoice('m'),                   // hurt vocals on a hit (see ROSTER voice)
+  hurtMd: () => hurtVoice('md'),
+  hurtF:  () => hurtVoice('f'),
+  // Mortal Kombat-style select screen: a metallic tick when the cursor moves, a deep boom + blade "shing" on a pick
+  selMove: () => { tone(1250, .05, 'square', .07, 820); noise(.06, .18, 5200, 'highpass'); tone(95, .09, 'sine', .25, 60); },
+  selPick: () => { tone(70, .55, 'sine', .55, 32); noise(.45, .5, 700, 'lowpass', 90); tone(2600, .5, 'triangle', .07, 2300, .05); tone(3900, .35, 'sine', .04, 3600, .06); },
   fight:  () => { tone(392, .15, 'sawtooth', .15); tone(523, .15, 'sawtooth', .15, null, .12); tone(784, .5, 'sawtooth', .18, null, .24); },
   ko:     () => { tone(220, 1.2, 'sawtooth', .2, 55); noise(1, .4, 600, 'lowpass', 80); },
   win:    () => [523, 659, 784, 1046].forEach((f, i) => tone(f, .28, 'triangle', .16, null, i * .13))
@@ -334,8 +369,8 @@ function keyInfo(e) {
   const code = KEYMAP[e.code] ? e.code : KEYALIAS[(e.key || '').toLowerCase()];
   const m = code && KEYMAP[code];
   if (!m) return null;
-  // online: either key set controls your own fighter
-  return { p: NET.role === 'local' ? m[0] : NET.me, act: m[1], src: 'key:' + code };
+  // online (and vs CPU): either key set controls your own fighter
+  return { p: NET.role !== 'local' ? NET.me : MATCH.cpu && !SEL.open ? 0 : m[0], act: m[1], src: 'key:' + code };
 }
 addEventListener('keydown', e => {
   const k = keyInfo(e);
@@ -1048,27 +1083,107 @@ function rkUpdate(dt) {
 // ROKAIA's special: a ponytail lash that cracks forward along the special lane (same lane / hit radius as the others)
 const WHIP_LASH = { speed: 34, life: 22 };
 
+// ---------- HAITHAM فرط ---------- (sheets in "Haitham فرط/", all looking right)
+// Recovery phases play the attack's own frames BACKWARDS (strike -> wind-up -> guard), so every attack returns to
+// his guard stance without extra art. No jump / crouch sheets: the kick's knee-up chamber is his jump, the KO
+// sheet's one-knee pose is his duck.
+const HT_DIR = '../../Haitham فرط/';
+const HAITHAM_ANIM = {
+  idle:    { file: [HT_DIR + 'S_Haitham_Idle.png'],                 frames: 1, h: STAND_H },
+  walk:    { file: [HT_DIR + 'T_Haitham_Walk_Sheet.png'],           frames: 4, h: STAND_H },
+  punch:   { file: [HT_DIR + 'T_Haitham_Punch_Sheet.png'],          frames: 3, fit: 0, h: STAND_H },  // guard, cock, jab
+  kick:    { file: [HT_DIR + 'T_Haitham_Kick_Sheet.png'],           frames: 4, fit: 1, h: STAND_H },  // chamber, knee up, kick, high kick
+  jump:    { file: [HT_DIR + 'T_Haitham_Kick_Sheet.png'],           frames: 4, use: [1], fit: 0, h: STAND_H * .98 },
+  crouch:  { file: [HT_DIR + 'T_Haitham_KO_Sheet.png'],             frames: 3, use: [1], h: CROUCH_H },
+  block:   { file: [HT_DIR + 'T_Haitham_Block_Sheet.png'],          frames: 2, fit: 0, h: STAND_H * .97 }, // guard up, cover the face
+  launch:  { file: [HT_DIR + 'T_Haitham_Special_Sheet.png'],        frames: 4, fit: 0, h: STAND_H },  // draw, aim, FIRE, guns down
+  hit:     { file: [HT_DIR + 'T_Haitham_HitStun_Sheet.png'],        frames: 4, fit: 3, h: STAND_H },  // the cigar flies
+  ko:      { file: [HT_DIR + 'T_Haitham_KO_Sheet.png'],             frames: 3, fit: 0, h: STAND_H * .97 }, // stagger, one knee, slumped
+  victory: { file: [HT_DIR + 'T_Haitham_VictorySpin_Sheet.png'],    frames: 4, fit: 0, h: STAND_H },  // 360 spin (MJ turn)
+  cigar:   { file: [HT_DIR + 'T_Haitham_VictoryDance2_Sheet.png'],  frames: 4, fit: 0, h: STAND_H }   // lighter, flame, light up, exhale
+};
+// his match victory (G.vt seconds, timed to victory.mp3): two smooth spins, then he lights his cigar while the camera
+// closes in on his face
+const HV = { SPIN_END: 3.2, SPIN_FRAME: .2, CIGAR: [[3.2, 0], [4.0, 1], [5.4, 2], [6.8, 3]], ZOOM_T: 4.0, ZOOM_IN: 1.1, ZOOM_Z: 2.0 };
+function haithamVictoryFrame(vt) {
+  if (vt < HV.SPIN_END) return ['victory', Math.floor(vt / HV.SPIN_FRAME) % 4];
+  let i = 0; for (const [t, f] of HV.CIGAR) if (vt >= t) i = f;
+  return ['cigar', i];
+}
+// guard -> cock -> strike, then the same frames in reverse back to guard
+const fwdBack = (st, wind, strike) => st.ph === 'wind' ? wind[Math.min(wind.length - 1, Math.floor(st.k * wind.length))]
+  : st.ph === 'strike' ? strike : [...wind].reverse()[Math.min(wind.length - 1, Math.floor(st.k * wind.length))];
+// block in / out: a 0..BLK_N counter that climbs while blocking and falls after release (stepped by game frames,
+// so it plays the same on the host and the online guest)
+const BLK_N = 8;
+function blockK(f) {
+  const df = f._bkF == null ? 1 : clamp(G.frame - f._bkF, 0, BLK_N); f._bkF = G.frame;
+  return (f._bk = clamp((f._bk || 0) + (f.blocking ? df : -df), 0, BLK_N));
+}
+function haithamFrame(st, f) {
+  const bk = blockK(f);
+  switch (st.s) {
+    case 'hvic': return haithamVictoryFrame(G.vt || 0);
+    case 'walk': return ['walk', ((Math.floor(f.walkPh * .5) % 4) + 4) % 4];
+    case 'crouch': return ['crouch', 0];
+    case 'block': return ['block', bk < BLK_N / 2 ? 0 : 1];                       // raise guard -> cover up
+    case 'idle': if (bk > 0) return ['block', bk < BLK_N / 2 ? 0 : 1];             // let go: the same frames in reverse
+      return ['idle', 0];
+    case 'punch': return ['punch', fwdBack(st, [0, 1], 2)];
+    case 'kick': return ['kick', fwdBack(st, [0, 1, 2], 3)];
+    case 'airPunch': return ['punch', 2];
+    case 'airKick': return ['kick', 3];
+    case 'overhead': return f.vy < 0 ? ['jump', 0] : ['kick', 3];
+    case 'slam': return ['kick', 3];
+    case 'jumpRise': case 'jumpApex': case 'jumpFall': return ['jump', 0];
+    case 'special': return ['launch', st.i];                                       // both pistols fire on frame 3
+    case 'stun': return ['hit', st.i];
+    case 'hitAir': return ['ko', 0];
+    // knocked down: slumped on his knees, then up through the KO frames in reverse (kneel -> one knee -> stagger)
+    case 'down': return f.knock === 'rise' ? ['ko', f.knockT > 11 ? 1 : 0] : ['ko', 2];
+    case 'victory': return ['victory', Math.floor(G.frame / 9) % 4];              // round win: keeps spinning
+    case 'defeat': return ['ko', 2];
+    default: return ['idle', 0];
+  }
+}
+// where his face is in a frame (frame px from the left / top), measured once from the art for the cigar close-up
+function faceOf(A, F) {
+  if (F.face) return F.face;
+  try {
+    const d = A.strip.getContext('2d').getImageData(F.sX, F.sY, F.w, Math.ceil(F.h * .22)).data, rows = Math.ceil(F.h * .22);
+    let sx = 0, n = 0; for (let y = Math.floor(rows * .4); y < rows; y++) for (let x = 0; x < F.w; x++) if (d[(y * F.w + x) * 4 + 3] > 120) { sx += x; n++; }
+    return (F.face = [n ? sx / n : F.w / 2, F.h * .15]);
+  } catch (e) { return (F.face = [F.w / 2, F.h * .15]); }
+}
+
 /* ---------- ROSTER: every selectable fighter ----------
    special: 'gun' = MOE's energy blast, 'flower' = ROMANA's heart blast, 'fire' = JOE's fireball (all share the same lane,
    speed rules and 10 damage). Any two can meet, including mirror matches. */
 const ROSTER = {
-  moe:    { id: 'moe', name: 'MOE', base: 'moe', anims: MOE_ANIM, frame: moeFrame, idle: { speed: .045, amp: 1 }, victoryFrom: 3.8,
+  moe:    { id: 'moe', name: 'MOE', base: 'moe', voice: 'm', anims: MOE_ANIM, frame: moeFrame, idle: { speed: .045, amp: 1 }, victoryFrom: 3.8,
             color: '#ff6a2a', special: 'gun', specialName: 'ENERGY BLAST!', hud: 'BLAST', hitWord: 'ZAPPED!', hitColor: '#ff3030', tag: 'Secret agent' },
-  joe:    { id: 'joe', name: 'JOE', base: 'joe', anims: JOE_ANIM, frame: joeFrame, idle: { speed: .06, amp: 2 }, victoryFrom: 3.8,
-            portrait: '../../WebGame/Joe selection.png', avatar: [.4, .06, .24],   // select card: his character-select photo
+  joe:    { id: 'joe', name: 'JOE', base: 'joe', voice: 'm', anims: JOE_ANIM, frame: joeFrame, idle: { speed: .06, amp: 2 }, victoryFrom: 3.8,
+            portrait: '../../WebGame/Joe selection.png', avatar: [.4, .06, .24], card: [.32, .03, .36], // select card: headshot of his photo
             color: '#ffb000', special: 'fire', specialName: 'FIREBALL!', hud: 'FIRE', hitWord: 'BURNED!', hitColor: '#ff6a2a', tag: 'Fire ninja' },
-  romana: { id: 'romana', name: 'ROMANA', base: 'romana', anims: ROMANA_ANIM, frame: romanaFrame, idle: { speed: .08, amp: 2.5 }, victoryFrom: 2.95,
+  romana: { id: 'romana', name: 'ROMANA', base: 'romana', voice: 'f', anims: ROMANA_ANIM, frame: romanaFrame, idle: { speed: .08, amp: 2.5 }, victoryFrom: 2.95,
             color: '#ff4a7a', special: 'flower', specialName: 'HEART BLAST!', hud: 'HEART', hitWord: 'HEARTBROKEN!', hitColor: '#ff4a6a', tag: 'Royal heartbreaker' },
-  lulu:   { id: 'lulu', name: 'LULU', base: 'lulu', anims: LULU_ANIM, frame: luluFrame, idle: { speed: .07, amp: 2 }, victoryFrom: 3.8,
+  lulu:   { id: 'lulu', name: 'LULU', base: 'lulu', voice: 'f', anims: LULU_ANIM, frame: luluFrame, idle: { speed: .07, amp: 2 }, victoryFrom: 3.8,
             portrait: 'lulu_portrait.png', avatar: [.36, .01, .33], lieArt: true, // select-card art; head crop [x, y, size] of it
             cleanWhite: { region: [0, 1, 0, 1], lum: 230, minPx: 30, headY: .22, minPxHead: 120 },          // wears no white: clear every trapped gap
             color: '#4aa8ff', special: 'shuriken', specialName: 'SHURIKEN WAVE!', hud: 'SHURIKEN', hitWord: 'SLICED!', hitColor: '#3aa0ff', tag: 'Shuriken ninja' },
-  rokaia: { id: 'rokaia', name: 'ROKAIA', base: 'rokaia', anims: ROKAIA_ANIM, frame: rokaiaFrame, idle: { speed: .06, amp: 1.5 }, victoryFrom: 3.8,
+  rokaia: { id: 'rokaia', name: 'ROKAIA', base: 'rokaia', voice: 'f', anims: ROKAIA_ANIM, frame: rokaiaFrame, idle: { speed: .06, amp: 1.5 }, victoryFrom: 3.8,
             portrait: RK_DIR + 'rokaia_ref_1.png', avatar: [.3, .04, .42], lieArt: true, dance: true, // match win: 27s music dance
             cleanWhite: { region: [0, 1, 0, 1], lum: 230, minPx: 30, headY: .22, minPxHead: 120 },          // wears no white: clear every trapped gap
-            color: '#ff3a5a', special: 'whip', specialName: 'PONYTAIL WHIP!', hud: 'WHIP', hitWord: 'WHIPPED!', hitColor: '#ff4a5a', tag: 'Ponytail fighter' }
+            color: '#ff3a5a', special: 'whip', specialName: 'PONYTAIL WHIP!', hud: 'WHIP', hitWord: 'WHIPPED!', hitColor: '#ff4a5a', tag: 'Ponytail fighter' },
+  haitham: { id: 'haitham', name: 'HAITHAM فرط', base: 'haitham', voice: 'md', anims: HAITHAM_ANIM, frame: haithamFrame, idle: { speed: .05, amp: 1.2 }, victoryFrom: 3.8,
+            portrait: HT_DIR + 'T_Haitham_Portrait.png', avatar: [.26, .1, .5], lieArt: true, cigar: true,   // match win: spin + cigar close-up
+            cleanWhite: { region: [0, 1, 0, 1], lum: 236, minPx: 60, headY: .22, minPxHead: 200 },        // wears no white (cigar smoke stays)
+            heavyHits: true,                                                                                   // MK-style punch impacts
+            atk: { punch: { start: 8, active: 5, rec: 13 } },                                                  // 3-frame jab: held longer so it reads like the others
+            color: '#2a5cff', special: 'pistols', specialName: 'DOUBLE TAP!', hud: 'PISTOLS', hitWord: 'BANG BANG!', hitColor: '#ffd23a', tag: 'The Boss' }
 };
-const ROSTER_ORDER = ['moe', 'joe', 'romana', 'lulu', 'rokaia'];
+const ROSTER_ORDER = ['moe', 'joe', 'romana', 'lulu', 'rokaia', 'haitham'];
+const ROSTER_ROWS = [['moe', 'joe', 'romana', 'lulu'], ['rokaia', 'haitham']]; // select screen: 4 on top, 2 side by side below
 const CHARACTERS = ROSTER_ORDER.map(k => ROSTER[k]);
 const SPRITES = {};   // id -> loaded animations (filled at startup)
 const SLOT_KEYS = ['F', 'NUM3/V'];
@@ -1460,6 +1575,7 @@ function pickState(f) {
     : holdFrame((G.vt || 0) - f.char.victoryFrom, VICTORY_HOLD.match) };           // match win: timed to the song
   if (f.vpose === 'defeat') return { s: 'defeat' };
   if (f.vpose === 'dance') return { s: 'dance' };              // ROKAIA's music-synced match victory
+  if (f.vpose === 'hvic') return { s: 'hvic' };                // HAITHAM's spin + cigar victory
   if (f.vpose) return { s: f.vpose === 'rise' ? 'jumpRise' : f.vpose === 'slam' ? 'slam' : 'crouch' };
   if (f.knock === 'air') return { s: 'hitAir' };
   if (f.knock !== 'none') return { s: 'down' };
@@ -1476,7 +1592,7 @@ function pickState(f) {
   }
   f.react = null;
   if (a) {
-    const d = ATK[a.type];
+    const d = a.d || ATK[a.type];
     if (a.type === 'punch' || a.type === 'kick') {
       if (a.t <= d.start) return { s: a.type, ph: 'wind', k: a.t / d.start };
       if (a.t <= d.start + d.active) return { s: a.type, ph: 'strike', k: 0 };
@@ -1549,7 +1665,7 @@ function solveRig(p) {
 /* ---------- pose selection ---------- */
 function actionExt(a) {
   if (!a || a.type === 'special') return 0;
-  const d = ATK[a.type];
+  const d = a.d || ATK[a.type];
   if (a.t <= d.start) return a.t / d.start * .3;
   if (a.t <= d.start + d.active) return 1;
   return Math.max(0, 1 - (a.t - d.start - d.active) / d.rec);
@@ -1568,12 +1684,12 @@ function targetPose(f) {
   if (f.stun > 0) { const k = f.stun / 18; return P({ hx: -12 * k, hy: -166, torso: -.34 * k, head: -.35 * k, fh: [-4, 62], bh: [-30, 56], ff: [50, 0], bf: [-52, 0] }); }
   if (a) {
     if (a.type === 'punch') {
-      const d = ATK.punch, e = actionExt(a);
+      const d = a.d || ATK.punch, e = actionExt(a);
       if (a.t <= d.start) return P({ torso: .04, hx: -4, fh: [22, 26], bh: [28, 36], ff: [44, 0], bf: [-50, 0] });
       return P({ hx: 12 * e, torso: .1 + .2 * e, head: -.1 * e, fh: [lerp(44, 140, e), lerp(22, -6, e)], bh: [lerp(30, 14, e), lerp(40, 52, e)], ff: [46 + 12 * e, 0], bf: [-50, 0] });
     }
     if (a.type === 'kick') {
-      const d = ATK.kick, e = actionExt(a);
+      const d = a.d || ATK.kick, e = actionExt(a);
       if (!f.onGround) return lerpPose(P({ hy: -172, ff: [40, -80], bf: [-26, -50] }), P({ hy: -170, torso: -.3, fh: [36, -6], bh: [-24, 40], ff: [168, -86], bf: [-34, -40] }), e);
       const chamber = P({ hx: -4, torso: -.12, fh: [34, 16], bh: [16, 40], ff: [58, -116], bf: [-34, 0] });
       const ext = P({ hx: -14, torso: -.45, head: .25, fh: [30, 34], bh: [6, 54], ff: [176, -150], bf: [-40, 0] });
@@ -1633,7 +1749,6 @@ function renderFighter(f) {
     else if (f.special === 'fire') drawFireCharge(g, R, a);           // JOE: fireball gathering in his fist
     else if (f.special === 'gun' && !f.spr.projectile) drawGun(g, R, a);
   }
-  if (f.blocking) drawShield(g, R);
   g.restore();
   // scene lighting: warm lava bounce from below, smoky shadow from above
   g.globalCompositeOperation = 'source-atop';
@@ -1648,14 +1763,6 @@ function renderFighter(f) {
   g.fillStyle = gr; g.fillRect(0, 0, f.cv.width, f.cv.height);
   // (no hit-flash overlay: a fighter who gets hit is drawn normally — the reaction animation shows the hit)
   g.globalCompositeOperation = 'source-over';
-}
-function drawShield(g, R) {
-  const pulse = .75 + .25 * Math.sin(G.frame * .3), cx = R.hF[0] + 26, cy = R.hF[1] + 30;
-  g.save(); g.globalCompositeOperation = 'lighter';
-  g.strokeStyle = `rgba(120,210,255,${.8 * pulse})`; g.lineWidth = 5; g.shadowColor = '#4ab8ff'; g.shadowBlur = 18;
-  g.beginPath(); g.arc(cx - 60, cy, 130, -.95, .95); g.stroke();
-  g.fillStyle = `rgba(80,170,255,${.10 * pulse})`; g.beginPath(); g.arc(cx - 60, cy, 130, -.95, .95); g.closePath(); g.fill();
-  g.restore();
 }
 function drawFireCharge(g, R, a) {
   const k = a.t < 20 ? a.t / 20 : Math.max(0, 1 - (a.t - 20) / 8);
@@ -1742,7 +1849,7 @@ class Fighter {
     Object.assign(this, {
       x, y: GROUND, vx: 0, vy: 0, onGround: true, hp: MAX_HP, hpShown: MAX_HP, action: null, stun: 0,
       knock: 'none', knockT: 0, airT: 0, ko: false, blocking: false, walking: false, flash: 0, win: false,
-      walkPh: 0, cloakSway: 0, trail: [], vpose: null, crouching: false, hitType: null
+      walkPh: 0, cloakSway: 0, trail: [], vpose: null, crouching: false, hitType: null, chain: null
     });
     this.facing = x < STAGE_W / 2 ? 1 : -1;
     this.pose = P({}); this.R = solveRig(this.pose);
@@ -1841,6 +1948,15 @@ function updateVictory() {
   G.timer++;
   const vt = G.vt = victoryClock(), w = fighters[G.winnerIdx], l = fighters[1 - G.winnerIdx];
   w.facing = l.x >= w.x ? 1 : -1; w.stun = 0; w.blocking = false; w.walking = false; w.vx = 0; w.knock = 'none';
+  if (w.char.cigar) { // HAITHAM: spins twice, then lights his cigar (frames from G.vt — haithamVictoryFrame)
+    w.action = null; w.vpose = 'hvic'; w.y = GROUND; w.onGround = true; w.vy = 0; w.win = true;
+    if (l.knock === 'air') { l.airT++; l.vy += GRAV; l.y += l.vy; l.x += l.vx; if (l.y >= GROUND) { l.y = GROUND; l.vy = 0; l.onGround = true; l.knock = 'down'; } }
+    if (l.knock === 'down' && vt >= 1.6) { l.knock = 'none'; l.vpose = 'defeat'; l.stun = 0; l.y = GROUND; l.onGround = true; l.vx = 0; l.facing = w.x >= l.x ? 1 : -1; }
+    for (const f of fighters) if (f.flash > 0) f.flash--;
+    centreWinner(w); pullLoserIn(w, l); animateFighter(w); animateFighter(l);
+    if (vt >= VICTORY_LEN) gameOver();
+    return;
+  }
   if (w.char.dance) { // ROKAIA: her 27s routine from the first second (the frames come from rkUpdate, run every render)
     w.action = null; w.vpose = 'dance'; w.y = GROUND; w.onGround = true; w.vy = 0; w.win = true;
     if (l.knock === 'air') { l.airT++; l.vy += GRAV; l.y += l.vy; l.x += l.vx; if (l.y >= GROUND) { l.y = GROUND; l.vy = 0; l.onGround = true; l.knock = 'down'; } }
@@ -1901,7 +2017,7 @@ function showGameOver() {
 /* ---------- game-over screen: the winner, enlarged and airborne, chains every attack & jump pose ----------
    The pose shown comes from the victory song's playback position (so host and guest stay in step and the moves
    ride the music); bass hits from the song (WebAudio analyser) add a pulse, a white flash and a starburst. */
-const MONTAGE_ANIMS = ['jump', 'punch', 'kick', 'roundhouse', 'launch', 'victory']; // each animation's frames in turn
+const MONTAGE_ANIMS = ['jump', 'punch', 'kick', 'roundhouse', 'launch', 'victory', 'cigar']; // each animation's frames in turn
 const MONTAGE_FPS = 9;
 // the winner's montage: every frame of each attack / jump / special / victory animation they have art for
 function montageSeq(spr) {
@@ -1910,7 +2026,8 @@ function montageSeq(spr) {
     const A = spr[name]; if (!A || !spr.own[name] || seen.has(A)) continue; seen.add(A); // only animations with their own art
     const n = A.frames.length;
     // attacks flash by; the victory animation is held so it can be watched (MONTAGE_VICTORY_HOLD seconds a frame)
-    for (let i = 0; i < n; i++) seq.push([name, i, name === 'victory' ? (i === n - 1 ? MONTAGE_VICTORY_HOLD * 1.8 : MONTAGE_VICTORY_HOLD) : 1 / MONTAGE_FPS]);
+    const held = name === 'victory' || name === 'cigar';
+    for (let i = 0; i < n; i++) seq.push([name, i, held ? (i === n - 1 ? MONTAGE_VICTORY_HOLD * 1.8 : MONTAGE_VICTORY_HOLD) : 1 / MONTAGE_FPS]);
   }
   if (!seq.length) seq.push(['idle', 0, 1]);
   seq.total = seq.reduce((s, e) => s + e[2], 0);
@@ -2015,7 +2132,8 @@ function drawMontage() {
    COMBAT
    ===================================================================== */
 function startAction(f, type) {
-  f.action = { type, t: 0, hit: false };
+  const o = f.char.atk && f.char.atk[type];   // per-fighter timing tweaks (same reach / damage)
+  f.action = { type, t: 0, hit: false, d: o ? { ...ATK[type], ...o } : ATK[type] };
   if (type === 'special') {
     f.specialUsed = true;
     popup(f.char.specialName, f.x, f.y - FH - 80, f.color, 44);
@@ -2055,7 +2173,8 @@ function landHit(a, d, type, data, px, py) {
   burst(px, py, 16 + 10 * dmg, ['#ffffff', '#ffe08a', '#ff7a1a', '#ff2a10'], 8 + 2 * dmg);
   popup(`-${dmg}`, px, py - 20, '#ffdc5a', 26 + 6 * dmg);
   if (type === 'overhead') popup('OVERHEAD!', d.x, d.y - FH - 60, a.color, 40);
-  heavy ? sfx.heavy() : sfx.hit();
+  heavy || a.char.heavyHits ? sfx.heavy() : sfx.hit();       // HAITHAM's punches land with the heavy MK-style smack
+  hurtSfx(d);                                                  // ...and the one hit cries out (male / female voice)
   G.hitStop = 3 + dmg; shake(4 + 3 * dmg, 6 + 3 * dmg); // (no screen flash on hits)
   if (d.hp <= 0) knockdown(a, d, true);
   else if (type === 'overhead') knockdown(a, d, false); // the overhead smash floors the opponent
@@ -2072,7 +2191,7 @@ function specialHit(p, d) {
     : ['#ffffff', '#fff2a0', '#ff3020', '#8a0000'], 14);
   popup(a.char.hitWord, d.x, d.y - FH - 70, a.char.hitColor, 50);
   popup('-10', d.x, d.y - FH * .7, '#ffdc5a', 40);
-  sfx.boom(); G.hitStop = 10; shake(16, 22); // (no screen flash on special hits)
+  sfx.boom(); hurtSfx(d); G.hitStop = 10; shake(16, 22); // (no screen flash on special hits)
   knockdown(a, d, d.hp <= 0);
 }
 
@@ -2100,6 +2219,12 @@ function fireSpecial(f) {
     const [x] = toWorld(f, [R.hF[0] + 30, 0]);
     projectiles.push({ type: 'fire', owner: f, x, y, vx: f.facing * 12.5, r: SPECIAL_HIT_R, t: 0 });
     sfx.fire();
+  } else if (f.special === 'pistols') { // HAITHAM: both sidearms fire at once — one shot in the lane, a twin tracer
+    const [x] = toWorld(f, [R.hF[0] + 40, 0]);
+    projectiles.push({ type: 'pistols', owner: f, x, y, vx: f.facing * 36, r: SPECIAL_HIT_R, t: 0 });
+    burst(x, y - 14, 14, ['#ffffff', '#fff2a0', '#ffb020'], 8); burst(x, y + 12, 14, ['#ffffff', '#fff2a0', '#ffb020'], 8);
+    for (let i = 0; i < 4; i++) particles.push({ x: x - f.facing * 40, y: y - 20, vx: -f.facing * rand(1, 3), vy: rand(-6, -3), grav: .35, life: 40, max: 40, size: 4, color: '#e8b048' }); // shell casings
+    sfx.gun(); setTimeout(() => sfx.gun(), 70); shake(8, 8);
   } else if (f.special === 'whip') { // ROKAIA: ponytail lash cracking forward from her head along the special lane
     const [x] = toWorld(f, [40, 0]);
     projectiles.push({ type: 'whip', owner: f, x, y, vx: f.facing * WHIP_LASH.speed, r: SPECIAL_HIT_R, t: 0, x0: x });
@@ -2135,6 +2260,16 @@ function updateFighter(f, o, canAct) {
   else if (f.stun > 0) f.stun--;
   else {
     if (f.onGround && !f.action) f.facing = o.x >= f.x ? 1 : -1;
+    // Up + Block + Kick together: auto-chaining special — fires the special again and again, 1 second apart,
+    // until the opponent is K.O. (ignores the once-per-round rule; cleared when the round resets)
+    if (canAct && !f.chain && isHeld(p, 'jump') && isHeld(p, 'block') && isHeld(p, 'kick')) {
+      f.chain = { next: G.frame }; consume(p, 'jump'); consume(p, 'kick');
+      popup('SPECIAL CHAIN!', f.x, f.y - FH - 130, f.color, 40); sfx.selPick();
+    }
+    if (f.chain && (o.hp <= 0 || o.ko)) f.chain = null;
+    if (canAct && f.chain && !f.action && f.onGround && G.frame >= f.chain.next) {
+      startAction(f, 'special'); f.chain.next = G.frame + ATK.special.total + 60; // 1s after each special ends
+    }
     if (canAct && !f.action) {
       // special has priority and works on its own key alone (even while holding block / moving);
       // a longer buffer means a press just before landing still fires
@@ -2184,7 +2319,7 @@ function updateFighter(f, o, canAct) {
       if (!a.hit && !f.onGround && a.t > d.start && f.vy > -6) tryHit(f, o, a, d); // strikes on the way down
       if (a.t >= d.start + d.active + d.rec) f.action = null;
     } else {
-      const d = ATK[a.type];
+      const d = a.d || ATK[a.type];
       // pressing the other attack button during a ground punch / kick's wind-up turns it into the overhead
       if ((a.type === 'punch' || a.type === 'kick') && a.t <= COMBO_WINDOW && canAct && consume(p, a.type === 'punch' ? 'kick' : 'punch', COMBO_WINDOW)) {
         f.action = null; startAction(f, 'overhead');
@@ -2234,7 +2369,7 @@ function animateFighter(f) {
     f.topY = fr.pose === 'crouch' && f.onGround ? -fr.F.h : -f.spr.standH;
   }
   // strike trail (fist / foot) in world space
-  if (a && a.type !== 'special' && a.t > ATK[a.type].start - 2) f.trail.push(toWorld(f, usesFist(a.type) ? f.R.hF : f.R.anF));
+  if (a && a.type !== 'special' && a.t > (a.d || ATK[a.type]).start - 2) f.trail.push(toWorld(f, usesFist(a.type) ? f.R.hF : f.R.anF));
   else f.trail.length = 0;
   if (f.trail.length > 6) f.trail.shift();
 }
@@ -2308,8 +2443,40 @@ function fireTrail(p) {
   particles.push({ x: p.x - p.vx * rand(0, 1), y: p.y + rand(-16, 16), vx: -p.vx * rand(.05, .15), vy: rand(-1, .8), grav: .06, life: rand(26, 40) | 0, max: 40, size: rand(4, 7), color: Math.random() < .7 ? '#e0142c' : '#ff6a7a', petal: true, spin: rand(-.3, .3) });
 }
 
+/* ---------- CPU rival (single player: "Play vs CPU") — tuned Medium-Low ----------
+   It re-decides every 14–26 frames (~0.25–0.45s, a human-ish reaction time) and holds that choice in between. It
+   only ever presses buttons through the same input path as a player (source 'ai'), so every rule applies to it.
+   Easy to read and beat, but it still walks in, pokes, blocks some attacks and dodges some specials. */
+const CPU_TUNE = { think: [14, 26], attack: .42, block: .26, dodge: .33, special: .08, jumpIn: .05 };
+const CPU = { next: 0, hold: {} };
+function cpuSet(acts) { // hold exactly these movement / guard actions
+  for (const act of ['left', 'right', 'jump', 'crouch', 'block']) {
+    const want = !!acts[act];
+    if (want !== !!CPU.hold[act]) { want ? press(1, act, 'ai') : release(1, act, 'ai'); CPU.hold[act] = want; }
+  }
+}
+function cpuTap(act) { press(1, act, 'ai'); release(1, act, 'ai'); }
+function cpuThink(f, o) {
+  if (G.phase !== 'fight' || f.knock !== 'none' || o.ko) { if (Object.values(CPU.hold).some(Boolean)) cpuSet({}); CPU.next = 0; return; }
+  if (G.frame < CPU.next) return;
+  const T = CPU_TUNE; CPU.next = G.frame + T.think[0] + Math.floor(Math.random() * (T.think[1] - T.think[0] + 1));
+  const dist = Math.abs(o.x - f.x), toward = o.x > f.x ? 'right' : 'left', away = toward === 'right' ? 'left' : 'right', r = Math.random();
+  const incoming = projectiles.some(p => p.owner === o && Math.sign(f.x - p.x) === Math.sign(p.vx) && Math.abs(f.x - p.x) < 420);
+  if (incoming) { cpuSet(r < T.dodge ? { [Math.random() < .5 ? 'crouch' : 'jump']: true } : {}); return; }
+  if (o.action && dist < 250 && r < T.block) { cpuSet({ block: true }); return; }
+  if (dist > 230) { // out of reach: walk in, now and then jump in or fire the special
+    if (!f.specialUsed && dist > 380 && r < T.special) { cpuSet({}); cpuTap('special'); return; }
+    cpuSet(r < T.special + T.jumpIn ? { [toward]: true, jump: true } : { [toward]: true });
+    return;
+  }
+  if (r < T.attack) { cpuSet({}); cpuTap(Math.random() < .6 ? 'punch' : 'kick'); }
+  else if (r < T.attack + .18) cpuSet({ block: true });
+  else if (r < T.attack + .32) cpuSet({ [away]: true });                 // back off a step
+  else cpuSet({});                                                        // hesitate: an opening for the player
+}
 function update() {
   G.frame++;
+  if (MATCH.cpu && NET.role === 'local' && fighters.length === 2) cpuThink(fighters[1], fighters[0]);
   if (G.phase === 'menu' || G.phase === 'gameover') { updateAmbient(); return; }
   if (G.phase === 'intro') { updateIntro(); updateCosmetics(); return; }
 
@@ -2490,7 +2657,15 @@ function victoryZoom() {
   // anchor the top of both heads (incl. dizzy stars / tiara) just under the top letterbox instead
   const tyFeet = 636 - z * w.y;
   const tyHeads = Math.min(84 - z * top, H - 86 - z * floor);   // heads in, floor never cut off
-  return [-a * z, clamp(lerp(tyFeet, tyHeads, cel), H - z * H, 0), z];
+  const shot = [-a * z, clamp(lerp(tyFeet, tyHeads, cel), H - z * H, 0), z];
+  // HAITHAM's cigar: once the lighter comes up, the camera pushes in close on his FACE (the pair shot is left behind)
+  if (w.char.cigar && vt >= HV.ZOOM_T && w.fr && w.fr.F) {
+    const k = smooth(HV.ZOOM_T, HV.ZOOM_T + HV.ZOOM_IN, vt), F = w.fr.F, fc = faceOf(w.fr.A, F), zf = HV.ZOOM_Z;
+    const fx = w.x - cam.x + w.facing * (fc[0] - F.ax), fy = w.y - F.h + fc[1];
+    const tx = clamp(W / 2 - zf * fx, W - zf * W, 0), ty = clamp(H * .42 - zf * fy, H - zf * H, 0);
+    return [lerp(shot[0], tx, k), lerp(shot[1], ty, k), lerp(shot[2], zf, k)];
+  }
+  return shot;
 }
 const VICTORY_CLOSE_Z = 1.55;  // celebration zoom (both fighters still side by side, heads to about the knees)
 const VICTORY_CLOSE_GAP = 310; // ...for which the loser is eased in to this distance: right beside the winner
@@ -2557,7 +2732,7 @@ function render() {
     ctx.save(); ctx.translate(sx, sy);
     if (VZ) { ctx.translate(VZ[0], VZ[1]); ctx.scale(VZ[2], VZ[2]); }
     const clean = victory || G.phase === 'gameover'; // victory + game over: no bars or HUD over the scene (it shows
-    if (!clean) fighters.forEach(drawOverhead);     // through the see-through game-over screen behind the dance)
+    if (!clean && !vsBannerInMatch()) fighters.forEach(drawOverhead); // (the VS banner carries the health bars in a fight)
     drawPopups(); ctx.restore();
     if (!clean) drawHUD();
     drawBanners();
@@ -3001,19 +3176,21 @@ function drawProjectiles() {
       ctx.drawImage(E.strip, F.sX, F.sY, F.w, F.h, Math.round(-F.w * .85), Math.round(-F.h / 2), F.w, F.h); // ball at the hit point
       ctx.restore();
     } else {
-      // high-speed bullet: long tracer streak + brass slug
+      // high-speed bullet: long tracer streak + brass slug (HAITHAM's pistols: two side by side, one per gun)
       const tail = p.vx * 4, dir = Math.sign(p.vx) || 1;
-      const gr = ctx.createLinearGradient(x - tail, 0, x, 0);
-      gr.addColorStop(0, 'rgba(255,200,80,0)'); gr.addColorStop(1, 'rgba(255,250,220,1)');
-      ctx.strokeStyle = gr; ctx.lineWidth = 6; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(x - tail, p.y); ctx.lineTo(x, p.y); ctx.stroke();
-      ctx.drawImage(L.ember, x - 16, p.y - 16, 32, 32);
-      ctx.save(); ctx.globalCompositeOperation = 'source-over'; ctx.translate(x, p.y); ctx.scale(dir, 1);
-      const bg = ctx.createLinearGradient(0, -6, 0, 6);
-      bg.addColorStop(0, '#fff2c0'); bg.addColorStop(.45, '#d8a040'); bg.addColorStop(1, '#6a4410');
-      ctx.fillStyle = bg; ctx.beginPath(); ctx.moveTo(-18, -5.5); ctx.lineTo(4, -5.5); ctx.quadraticCurveTo(16, -4, 20, 0); ctx.quadraticCurveTo(16, 4, 4, 5.5); ctx.lineTo(-18, 5.5); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = 'rgba(40,20,0,.8)'; ctx.lineWidth = 1; ctx.stroke();
-      ctx.restore();
+      for (const dy of p.type === 'pistols' ? [-13, 13] : [0]) {
+        const py = p.y + dy, gr = ctx.createLinearGradient(x - tail, 0, x, 0);
+        gr.addColorStop(0, 'rgba(255,200,80,0)'); gr.addColorStop(1, 'rgba(255,250,220,1)');
+        ctx.strokeStyle = gr; ctx.lineWidth = 6; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(x - tail, py); ctx.lineTo(x, py); ctx.stroke();
+        ctx.drawImage(L.ember, x - 16, py - 16, 32, 32);
+        ctx.save(); ctx.globalCompositeOperation = 'source-over'; ctx.translate(x, py); ctx.scale(dir, 1);
+        const bg = ctx.createLinearGradient(0, -6, 0, 6);
+        bg.addColorStop(0, '#fff2c0'); bg.addColorStop(.45, '#d8a040'); bg.addColorStop(1, '#6a4410');
+        ctx.fillStyle = bg; ctx.beginPath(); ctx.moveTo(-18, -5.5); ctx.lineTo(4, -5.5); ctx.quadraticCurveTo(16, -4, 20, 0); ctx.quadraticCurveTo(16, 4, 4, 5.5); ctx.lineTo(-18, 5.5); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(40,20,0,.8)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+      }
     }
   }
   ctx.restore();
@@ -3076,21 +3253,32 @@ function drawOverhead(f) {
   ctx.font = '20px Impact, "Arial Black", sans-serif'; ctx.textBaseline = 'bottom';
   ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.lineJoin = 'round';
   ctx.textAlign = 'left'; ctx.strokeText(f.name, bx, top - 3); ctx.fillStyle = f.color; ctx.fillText(f.name, bx, top - 3);
-  ctx.textAlign = 'right'; const hpTxt = `${f.hp}/${MAX_HP}`; ctx.strokeText(hpTxt, bx + w, top - 3); ctx.fillStyle = '#fff'; ctx.fillText(hpTxt, bx + w, top - 3);
   ctx.fillStyle = 'rgba(0,0,0,.75)'; ctx.fillRect(bx - 3, top - 3, w + 6, h + 6);
   ctx.fillStyle = '#3a0000'; ctx.fillRect(bx, top, w, h);
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(bx, top, w * f.hpShown / MAX_HP, h);
-  const r = f.hp / MAX_HP, gr = ctx.createLinearGradient(0, top, 0, top + h);
-  const c = r > .5 ? ['#9dff7a', '#2fbf3a'] : r > .25 ? ['#ffe27a', '#e09a10'] : ['#ff8a7a', '#d0180c'];
-  gr.addColorStop(0, c[0]); gr.addColorStop(1, c[1]);
-  ctx.fillStyle = gr; ctx.fillRect(bx, top, w * r, h);
-  ctx.fillStyle = 'rgba(0,0,0,.45)';
-  for (let i = 5; i < MAX_HP; i += 5) ctx.fillRect(bx + w * i / MAX_HP - 1, top, 2, h);
+  const r = f.hpShown / MAX_HP; // one solid bar, draining smoothly (hpShown eases down to hp)
+  ctx.fillStyle = f.hp / MAX_HP > .5 ? '#2fd13a' : f.hp / MAX_HP > .25 ? '#ffd21a' : '#e8200c'; ctx.fillRect(bx, top, w * r, h);
   ctx.strokeStyle = '#ffcf5a'; ctx.lineWidth = 1.5; ctx.strokeRect(bx - 1, top - 1, w + 2, h + 2);
   ctx.restore();
 }
 
 /* ---------- HUD & announcer ---------- */
+// special-move indicator beside the round dots: a glowing gold star while the special is ready, a dark one once used
+function drawSpecialStar(cx, cy, ready, key) {
+  const pulse = ready ? 1 + .08 * Math.sin(G.frame * .15) : 1, R = 17 * pulse, r = R * .45;
+  ctx.save(); ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r : R; ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); }
+  ctx.closePath();
+  if (ready) {
+    const g = ctx.createRadialGradient(cx - 3, cy - 4, 1, cx, cy, R); g.addColorStop(0, '#fffbe0'); g.addColorStop(.5, '#ffd23a'); g.addColorStop(1, '#d46a00');
+    ctx.fillStyle = g; ctx.shadowColor = '#ffb000'; ctx.shadowBlur = 14 + 6 * Math.sin(G.frame * .15);
+  } else ctx.fillStyle = 'rgba(50,40,40,.85)';
+  ctx.fill(); ctx.shadowBlur = 0; ctx.lineJoin = 'round'; ctx.lineWidth = 2; ctx.strokeStyle = ready ? '#fff3b0' : '#777'; ctx.stroke();
+  if (ready && key && !IS_TOUCH()) { // which key fires it
+    ctx.font = '12px Impact, "Arial Black", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.strokeText(key, cx, cy + R + 9); ctx.fillStyle = '#ffe9a0'; ctx.fillText(key, cx, cy + R + 9);
+  }
+  ctx.restore();
+}
 function drawHUD() {
   const vsb = vsBannerInMatch(), dy = vsb ? 78 : 0; // the VS banner shows the names: win pips, specials and round sit below it
   let gr = ctx.createLinearGradient(0, 0, 0, 110 + dy);
@@ -3109,13 +3297,7 @@ function drawHUD() {
       else ctx.fillStyle = 'rgba(40,10,0,.85)';
       ctx.fill(); ctx.shadowBlur = 0; ctx.strokeStyle = '#ffcf5a'; ctx.lineWidth = 2; ctx.stroke();
     }
-    const label = f.char.hud + ' ' + (f.specialUsed ? '— USED' : 'READY [' + f.specialKey + ']');
-    ctx.font = '18px Impact, "Arial Black", sans-serif';
-    const tw = ctx.measureText(label).width + 22, px = left ? x + 84 : x - 84 - tw;
-    ctx.fillStyle = f.specialUsed ? 'rgba(60,60,60,.8)' : (G.frame % 40 < 20 ? 'rgba(200,50,0,.9)' : 'rgba(150,30,0,.9)');
-    ctx.fillRect(px, 68, tw, 24);
-    ctx.strokeStyle = f.specialUsed ? '#777' : '#ffcf5a'; ctx.lineWidth = 1.5; ctx.strokeRect(px, 68, tw, 24);
-    ctx.textAlign = 'left'; ctx.fillStyle = f.specialUsed ? '#aaa' : '#fff'; ctx.fillText(label, px + 11, 81);
+    drawSpecialStar(left ? x + 84 : x - 84, 80, !f.specialUsed, f.specialKey);
     ctx.restore();
   });
   ctx.save(); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.translate(0, dy);
@@ -3598,7 +3780,7 @@ let touchSeen = false, touchP = 0;
 // touch UI: any touchscreen (phones, tablets, touch laptops) or a small viewport
 const IS_TOUCH = () => touchSeen || matchMedia('(pointer: coarse), (any-pointer: coarse)').matches || innerWidth < 900;
 addEventListener('touchstart', () => { if (!touchSeen) { touchSeen = true; touchShown = null; } }, { passive: true, capture: true });
-function touchPlayer() { return NET.role === 'local' ? touchP : NET.me; }
+function touchPlayer() { return NET.role === 'local' ? (MATCH.cpu ? 0 : touchP) : NET.me; } // vs CPU: touch is always P1
 function refreshTouchLabels() {
   const p = touchPlayer(), f = fighters[p];
   if (!f) return;
@@ -3648,7 +3830,14 @@ const SEL = { open: false, mode: 'local', side: [{ i: 0, lock: false }, { i: 2, 
 const selEls = () => [$('selP1'), $('selP2')];
 function drawPortrait(cv, id, mirror) { // the character's portrait art (or idle pose), fitted into the canvas, facing the middle
   const spr = SPRITES[id]; if (!spr) return;
-  const P = spr.portrait && spr.portrait.F, A = spr.idle, F = A.frames[0], g = cv.getContext('2d');
+  const P = spr.portrait && spr.portrait.F, A = spr.idle, F = A.frames[0], g = cv.getContext('2d'), crop = ROSTER[id].card;
+  if (crop && spr.portrait) { // headshot card: a square crop [x, y, size] of the portrait filling the whole card
+    const Q = spr.portrait, s = crop[2] * Q.W, k = Math.max(cv.width / s, cv.height / s);
+    g.clearRect(0, 0, cv.width, cv.height); g.save(); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.translate(cv.width / 2, cv.height / 2); if (mirror) g.scale(-1, 1);
+    g.drawImage(Q.c, crop[0] * Q.W, crop[1] * Q.H, s, s, -s * k / 2, -s * k / 2, s * k, s * k); g.restore();
+    return;
+  }
   const [src, sx, sy, w, h, ax] = P ? [P.c, 0, 0, P.w, P.h, P.w / 2] : [A.strip, F.sX, F.sY, F.w, F.h, F.ax];
   const k = Math.min(cv.width * .92 / w, cv.height * .96 / h);
   g.clearRect(0, 0, cv.width, cv.height); g.save(); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
@@ -3658,20 +3847,23 @@ function drawPortrait(cv, id, mirror) { // the character's portrait art (or idle
 function buildSelectScreen() {
   selEls().forEach((el, p) => {
     const box = el.querySelector('.sel-cards'); box.innerHTML = '';
-    ROSTER_ORDER.forEach((id, i) => {
+    ROSTER_ROWS.forEach((row, r) => { if (r) { const br = document.createElement('div'); br.className = 'sel-break'; box.append(br); } row.forEach(id => {
+      const i = ROSTER_ORDER.indexOf(id);
       const card = document.createElement('div'); card.className = 'sel-card'; card.dataset.i = i; card.dataset.badge = 'P' + (p + 1);
       const cv = document.createElement('canvas'); cv.width = 120; cv.height = 130; drawPortrait(cv, id, p === 1);
       const name = document.createElement('span'); name.textContent = ROSTER[id].name;
       card.append(cv, name); box.append(card);
       const tap = e => { e.preventDefault(); initAudio(); selTap(p, i); };
       card.addEventListener('click', tap); card.addEventListener('touchend', tap, { passive: false });
-    });
+    }); });
   });
   $('btnSelBack').onclick = () => { blurAll(); selBack(); };
 }
 const canControl = p => SEL.mode === 'local' || p === NET.me;
-function openSelect(mode) {
+// cpu: single player — P1 picks their fighter, then the rival the CPU will play (P1's keys move to the right panel)
+function openSelect(mode, cpu = false) {
   const idx = id => Math.max(0, ROSTER_ORDER.indexOf(id));
+  MATCH.cpu = mode === 'local' && cpu;
   Object.assign(SEL, { open: true, mode, starting: false, side: [{ i: idx(MATCH.chars[0]), lock: false }, { i: idx(MATCH.chars[1]), lock: false }] });
   $('start').classList.add('hidden'); $('over').classList.add('hidden'); showNetPanel(false); $('select').classList.remove('hidden');
   renderSelect();
@@ -3681,17 +3873,18 @@ function closeSelect() { SEL.open = false; $('select').classList.add('hidden'); 
 function sendSel(p, hello = false) { if (SEL.mode === 'online') netSend({ t: 'sel', p, i: SEL.side[p].i, lock: SEL.side[p].lock, hello }); }
 function selMove(p, d) {
   const s = SEL.side[p]; if (!SEL.open || SEL.starting || !canControl(p) || s.lock) return;
-  s.i = (s.i + d + ROSTER_ORDER.length) % ROSTER_ORDER.length; sfx.jump(); renderSelect(); sendSel(p);
+  s.i = (s.i + d + ROSTER_ORDER.length) % ROSTER_ORDER.length; sfx.selMove(); renderSelect(); sendSel(p);
 }
 function selLock(p, v) {
   const s = SEL.side[p]; if (!SEL.open || SEL.starting || !canControl(p) || s.lock === v) return;
-  s.lock = v; v ? sfx.block() : sfx.whoosh(); renderSelect(); sendSel(p); selCheckStart();
+  s.lock = v; v ? sfx.selPick() : sfx.whoosh(); renderSelect(); sendSel(p); selCheckStart();
 }
 function selTap(p, i) {
   if (!canControl(p) || SEL.starting) return;
   const s = SEL.side[p];
   if (s.i === i && s.lock) { selLock(p, false); return; }
   if (s.lock) s.lock = false;
+  if (s.i !== i) sfx.selMove();
   s.i = i; renderSelect(); sendSel(p); selLock(p, true);
 }
 function selBack() {
@@ -3719,18 +3912,37 @@ function renderSelect() {
     const s = SEL.side[p], id = ROSTER_ORDER[s.i], C = ROSTER[id], mine = canControl(p);
     el.classList.toggle('locked', s.lock); el.classList.toggle('remote', !mine);
     el.querySelectorAll('.sel-card').forEach(c => c.classList.toggle('on', +c.dataset.i === s.i));
-    drawPortrait(el.querySelector('.sel-big'), id, p === 1);
     el.querySelector('.sel-name').textContent = C.name;
     el.querySelector('.sel-tagline').textContent = C.tag;
-    el.querySelector('.sel-who').textContent = SEL.mode === 'online' ? (mine ? 'YOU' : 'OPPONENT') : 'PLAYER ' + (p + 1);
+    el.querySelector('.sel-who').textContent = SEL.mode === 'online' ? (mine ? 'YOU' : 'OPPONENT') : MATCH.cpu && p === 1 ? 'CPU RIVAL' : 'PLAYER ' + (p + 1);
     el.querySelector('.sel-help').innerHTML = s.lock ? 'Locked in' + (mine ? ' — tap again to change' : '')
       : !mine ? 'Choosing…'
       : SEL.mode === 'online' ? '<kbd>←</kbd>/<kbd>→</kbd> or <kbd>A</kbd>/<kbd>D</kbd> choose · <kbd>Punch</kbd> or tap to lock'
       : p === 0 ? '<kbd>A</kbd>/<kbd>D</kbd> choose · <kbd>L</kbd> lock · or tap' : '<kbd>←</kbd>/<kbd>→</kbd> choose · <kbd>N</kbd> lock · or tap';
   });
+  if (MATCH.cpu) $('selP2').querySelector('.sel-help').innerHTML = SEL.side[1].lock ? 'CPU locked in'
+    : SEL.side[0].lock ? 'Now pick your rival: <kbd>A</kbd>/<kbd>D</kbd> · <kbd>L</kbd> lock · or tap' : 'Pick your fighter first';
   const both = SEL.side[0].lock && SEL.side[1].lock;
   $('selStatus').textContent = SEL.starting || both ? 'GET READY!'
-    : SEL.mode === 'online' && !NET.conn ? 'Connecting…' : 'Lock in both fighters to start the match';
+    : SEL.mode === 'online' && !NET.conn ? 'Connecting…' : MATCH.cpu ? 'Pick your fighter, then your CPU rival' : 'Lock in both fighters to start the match';
+  drawSelBg();
+}
+// the picks, BIG, behind the select UI: P1's fighter on the left, P2's on the right (facing each other), fading
+// into the dark middle. Uses the large (game-over size) strip so they stay crisp.
+function drawSelBg() {
+  const cv = $('selBg'), g = cv.getContext('2d'); g.clearRect(0, 0, cv.width, cv.height);
+  SEL.side.forEach((s, p) => {
+    const spr = SPRITES[ROSTER_ORDER[s.i]]; if (!spr) return;
+    const A = spr.idle, F = A.frames[0], B = F.big, k = (cv.height * .9) / B.h, w = B.w * k, h = B.h * k;
+    const x = p ? cv.width * .86 : cv.width * .14;
+    g.save(); g.globalAlpha = s.lock ? .95 : .7; g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.translate(x, cv.height + 10); if (p) g.scale(-1, 1);
+    g.drawImage(A.big, B.sX, B.sY, B.w, B.h, -F.ax * MONTAGE_MULT * k, -h, w, h); g.restore();
+  });
+  const fade = g.createLinearGradient(0, 0, cv.width, 0); // dark centre so the panels and cards stay readable
+  fade.addColorStop(0, 'rgba(0,0,0,0)'); fade.addColorStop(.3, 'rgba(0,0,0,.25)'); fade.addColorStop(.5, 'rgba(0,0,0,.55)');
+  fade.addColorStop(.7, 'rgba(0,0,0,.25)'); fade.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = fade; g.fillRect(0, 0, cv.width, cv.height);
 }
 /* ---------- live VS banner: P1 / P2 avatar + name, updated the moment a pick changes ---------- */
 const HEAD_BOX = {};   // id -> head crop in its idle frame (found once from the art)
@@ -3770,6 +3982,18 @@ function syncVsBanner() {
   const inMatch = vsBannerInMatch(), show = !!SPRITES.moe && (SEL.open || inMatch), el = $('vsBanner');
   el.classList.toggle('hidden', !show); el.classList.toggle('match', inMatch);
   if (show) updateVsBanner(SEL.open ? SEL.side.map(s => ROSTER_ORDER[s.i]) : MATCH.chars);
+  if (inMatch && fighters.length === 2) syncVsbHp();
+}
+// health bars under the names in the banner: one solid bar that drains smoothly (CSS transition) and turns
+// green -> yellow -> red as HP runs out
+const VSB_HP = [{}, {}];
+function syncVsbHp() {
+  document.querySelectorAll('#vsBanner .vsb-hp').forEach((el, p) => {
+    const f = fighters[p], r = f.hp / MAX_HP, c = VSB_HP[p];
+    const tone = r > .5 ? 'hi' : r > .25 ? 'mid' : 'low';
+    if (c.hp !== f.hp) { c.hp = f.hp; el.querySelector('b').style.width = r * 100 + '%'; }
+    if (c.tone !== tone) { c.tone = tone; el.dataset.tone = tone; }
+  });
 }
 
 // keyboard on the select screen (either key set works for your own side online, like in a fight)
@@ -3778,10 +4002,15 @@ addEventListener('keydown', e => {
   if (e.code === 'Escape') { e.preventDefault(); selBack(); return; }
   const k = keyInfo(e); if (!k) return;
   e.preventDefault(); e.stopImmediatePropagation(); if (e.repeat) return;
-  if (k.act === 'left') selMove(k.p, -1);
-  else if (k.act === 'right') selMove(k.p, 1);
-  else if (k.act === 'punch' || k.act === 'kick' || k.act === 'special' || k.act === 'jump') selLock(k.p, !SEL.side[k.p].lock);
-  else if (k.act === 'block' || k.act === 'crouch') selLock(k.p, false);
+  let p = k.p;
+  if (MATCH.cpu) { // vs CPU: either key set drives P1's panel, then (once P1 is locked) the rival's panel
+    const back = k.act === 'block' || k.act === 'crouch';
+    p = back ? (SEL.side[1].lock ? 1 : 0) : SEL.side[0].lock ? 1 : 0;
+  }
+  if (k.act === 'left') selMove(p, -1);
+  else if (k.act === 'right') selMove(p, 1);
+  else if (k.act === 'punch' || k.act === 'kick' || k.act === 'special' || k.act === 'jump') selLock(p, !SEL.side[p].lock);
+  else if (k.act === 'block' || k.act === 'crouch') selLock(p, false);
 }, { capture: true });
 
 /* =====================================================================
@@ -3803,6 +4032,7 @@ Promise.all([loadPoses(), loadStage()]).then(([SPR]) => {
     makeFighters('moe', 'romana');   // default line-up until the select screen sets one
     buildSelectScreen();
     const b = $('btnStart'); b.disabled = false; b.textContent = 'Play Local';
+    $('btnCpu').disabled = false;
     $('btnHost').disabled = false;
     requestAnimationFrame(loop);
     if (JOIN_ID) joinOnline(JOIN_ID);
@@ -3817,7 +4047,19 @@ Promise.all([loadPoses(), loadStage()]).then(([SPR]) => {
 });
 
 function blurAll() { document.activeElement && document.activeElement.blur(); }
+// Mortal Kombat-style menu sounds: the metallic tick when the pointer moves onto a menu button, the deep boom +
+// blade "shing" when one is chosen (Back / Cancel just tick)
+const MENU_BTN = '.btn, .small-btn';
+document.addEventListener('mouseover', e => {
+  const b = e.target.closest && e.target.closest(MENU_BTN);
+  if (b && !b.disabled && !b.contains(e.relatedTarget)) sfx.selMove();
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest(MENU_BTN); if (!b || b.disabled) return;
+  initAudio(); b.classList.contains('grey') ? sfx.selMove() : sfx.selPick();
+}, true);
 $('btnStart').onclick = () => { initAudio(); blurAll(); netTeardown(); goFullscreenOnPhone(); openSelect('local'); };
+$('btnCpu').onclick = () => { initAudio(); blurAll(); netTeardown(); goFullscreenOnPhone(); openSelect('local', true); };
 $('btnHost').onclick = () => { initAudio(); blurAll(); netTeardown(); goFullscreenOnPhone(); hostOnline(); };
 $('btnCopy').onclick = () => {
   const inp = $('netLink'); inp.select();

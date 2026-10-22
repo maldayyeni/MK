@@ -169,3 +169,32 @@
   #mute{position:absolute;right:calc(var(--u)*.8);bottom:calc(var(--u)*.8);z-index:5;cursor:pointer;
     background:rgba(0,0,0,.5);color:#ffcf8a;border:1px solid rgba(255,150,60,.5);border-radius:calc(var(--u)*.4);
     font-size:calc(var(--u)*1.1);padding:calc(var(--u)*.2) calc(var(--u)*.6);font-family:"Segoe UI",Arial,sans-serif}
+
+  /* ---------- Select screen: big fighters behind the UI, Haitham's own row ---------- */
+  /* the small preview in each panel is gone: P1's pick stands huge on the LEFT, P2's on the RIGHT, behind the UI */
+  #selBg{position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;image-rendering:auto}
+  #select>*:not(#selBg){position:relative;z-index:1}
+  .sel-big{display:none}
+  .sel-side{background:rgba(0,0,0,.38)}
+  .sel-cards{flex-wrap:wrap;justify-content:center;row-gap:calc(var(--u)*.6)}
+  .sel-break{flex-basis:100%;height:0}            /* starts the bottom row (HAITHAM) */
+  .sel-cpu{font-size:calc(var(--u)*1.1);color:#fff;background:#3a3a3a;padding:0 calc(var(--u)*.5);border-radius:calc(var(--u)*.3);margin-left:calc(var(--u)*.4)}
+
+  /* ---------- In-fight banner: see-through name bars, health bar right under each name (next to the portrait) ---------- */
+  .vsb-col{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:calc(var(--u)*.35);margin-left:calc(var(--u)*-.8)}
+  .vsb-side[data-p="1"] .vsb-col{margin:0 calc(var(--u)*-.8) 0 0;align-items:stretch}
+  .vsb-col .vsb-bar{flex:none;margin:0!important}
+  .vsb-hp{display:none;position:relative;height:calc(var(--u)*1.7);margin:0 12% 0 calc(var(--u)*1.1);background:rgba(40,0,0,.75);
+    border:2px solid #ffcf5a;border-radius:calc(var(--u)*.25);box-shadow:0 0 calc(var(--u)*.5) rgba(0,0,0,.8);overflow:hidden}
+  .vsb-side[data-p="1"] .vsb-hp{margin:0 calc(var(--u)*1.1) 0 12%}
+  #vsBanner.match .vsb-hp{display:block}
+  .vsb-hp b{position:absolute;top:0;bottom:0;left:0;width:100%;background-color:#2fd13a;                       /* one solid, undivided bar */
+    transition:width .45s cubic-bezier(.2,.7,.3,1),background-color .4s linear}
+  .vsb-side[data-p="1"] .vsb-hp b{left:auto;right:0}                                                             /* P2 drains toward the middle */
+  .vsb-hp[data-tone="mid"] b{background-color:#ffd21a}
+  .vsb-hp[data-tone="low"] b{background-color:#e8200c}
+  #vsBanner.match .vsb-bar{box-shadow:none;
+    background:linear-gradient(90deg,color-mix(in srgb,var(--c) 55%,transparent),color-mix(in srgb,var(--c) 25%,transparent) 60%,transparent)}
+  #vsBanner.match .vsb-side[data-p="1"] .vsb-bar{
+    background:linear-gradient(270deg,color-mix(in srgb,var(--c) 55%,transparent),color-mix(in srgb,var(--c) 25%,transparent) 60%,transparent)}
+  #vsBanner.match .vsb-ava{opacity:.9}
