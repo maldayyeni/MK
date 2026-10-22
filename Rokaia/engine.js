@@ -1121,18 +1121,20 @@ function blockK(f) {
   return (f._bk = clamp((f._bk || 0) + (f.blocking ? df : -df), 0, BLK_N));
 }
 // his jab, keyframed on the action clock: guard (0) eases into the wind-up (1, fists pulled in), snaps to full
-// extension (2) on impact and holds, then retracts through the same frames in reverse (2 -> 1 -> 0). Between keys the
-// neighbouring frames crossfade, so the arm travels instead of popping.
+// extension (2) on impact and holds, then retracts through the same frames in reverse (2 -> 1 -> 0). Guard <-> wind-up
+// crossfade softly; the jab and its retraction snap so the fully extended arm always reads clean.
 function haithamPunch(f) {
   const a = f.action, d = (a && a.d) || ATK.punch, t = a ? a.t : 0, S = d.start, E = S + d.active, R = d.rec;
-  const keys = [[0, 0], [S * .3, 0], [S, 1], [S + 1, 2], [E + R * .2, 2], [E + R * .6, 1], [E + R, 0]];
+  const keys = [[0, 0], [S * .3, 0], [S, 1], [S + 1, 2], [E + R * .35, 2], [E + R * .5, 1], [E + R, 0]];
   let p = 0;
   for (let k = 1; k < keys.length; k++) {
     const [t0, p0] = keys[k - 1], [t1, p1] = keys[k];
     if (t <= t1) { const u = t1 > t0 ? clamp((t - t0) / (t1 - t0), 0, 1) : 1; p = p0 + (p1 - p0) * u * u * (3 - 2 * u); break; }
     p = p1;
   }
-  // the nearer frame is drawn solid and the other faded over it (never above 50%, so no double silhouette)
+  // the jab itself (wind-up <-> full extension) snaps, so the straight arm is never ghosted by the bent one
+  if (p > 1) return ['punch', p >= 1.5 ? 2 : 1];
+  // guard <-> wind-up: the nearer frame is drawn solid and the other faded over it (never above 50%)
   const n = Math.round(p), o = p < n ? n - 1 : n + 1, w = Math.abs(p - n);
   return w > .04 && o >= 0 && o <= 2 ? ['punch', n, { i: o, a: w }] : ['punch', n];
 }
